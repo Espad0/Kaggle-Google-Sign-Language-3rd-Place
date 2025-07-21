@@ -6,12 +6,14 @@ This repository contains the 3rd place solution developed by our team for the [G
 
 ## Problem Statement
 
-The task was to classify fingerspelling gestures representing individual letters and numbers from videos:
+The competition challenged participants to build a computer vision system capable of recognizing isolated sign language gestures in real-world conditions. 
 
-- Variable-length video sequences
-- Missing/incomplete landmark data
-- Real-time inference constraints (model size < 40MB)
-- Deployment via TensorFlow Lite
+**Technical challenges:**
+
+- Different durations for each gesture
+- Missing/incomplete data, frequent landmark occlusions
+- Tensorflow Lite models for mobile devices with 40MB size limit
+- 250+ gesture classes including letters, numbers, and common signs
 
 ## Solution Architecture
 

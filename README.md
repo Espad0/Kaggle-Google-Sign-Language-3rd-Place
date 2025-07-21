@@ -2,13 +2,11 @@
 
 ## Overview
 
-This repository contains my 3rd place solution for the [Google - American Sign Language Fingerspelling Recognition](https://www.kaggle.com/competitions/asl-fingerspelling) competition on Kaggle. The challenge involved building a model to recognize American Sign Language (ASL) fingerspelling gestures from video sequences captured via MediaPipe landmarks.
-
-**Competition Results**: 3rd Place out of 1,541 teams
+This repository contains the 3rd place solution developed by our team for the [Google - Isolated Sign Language](https://www.kaggle.com/competitions/asl-signs/overview) competition on Kaggle. The challenge involved building a model to recognize Isolated Sign Language (ISL) gestures from video sequences captured via MediaPipe landmarks.
 
 ## Problem Statement
 
-The task was to classify fingerspelling gestures representing individual letters and numbers from video sequences. Each video contained 3D coordinates of hand, face, and pose landmarks tracked over time. The main challenges included:
+The task was to classify fingerspelling gestures representing individual letters and numbers from videos:
 
 - Variable-length video sequences
 - Missing/incomplete landmark data

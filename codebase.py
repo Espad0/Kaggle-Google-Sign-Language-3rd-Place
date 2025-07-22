@@ -3,14 +3,14 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-# import tensorflow_addons as tfa  # No longer needed
+# import tensorflow_addons as tfa  # No longer needed - using native TF AdamW
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import seaborn as sn
 
 from tqdm.notebook import tqdm
 from sklearn.model_selection import train_test_split, GroupShuffleSplit 
-import tensorflow.keras.backend as K
+
 import glob
 import sys
 import os
@@ -45,9 +45,7 @@ N_WARMUP_EPOCHS = 0
 WD_RATIO = 0.05
 MASK_VAL = 4237
 
-# Label smoothing for loss function
-LABEL_SMOOTHING = 0.0
-
+# Read Training Data
 train = pd.read_csv('train.csv')
 
 N_SAMPLES = len(train)
@@ -62,10 +60,6 @@ def get_file_path(path):
     return f'/kaggle/input/asl-signs/{path}'
 
 train['file_path'] = train['path'].apply(get_file_path)
-
-# Ordinal Encoding: Convert sign names to numerical codes for ML model training
-# Each unique sign name gets a unique integer (0, 1, 2, ...) based on alphabetical order
-# This creates a numerical representation that the model can process
 
 # Add ordinally Encoded Sign (assign number to each sign name)
 train['sign_ord'] = train['sign'].astype('category').cat.codes
@@ -84,7 +78,8 @@ def load_relevant_data_subset(pq_path):
     data = data.values.reshape(n_frames, ROWS_PER_FRAME, len(data_columns))
     return data.astype(np.float32)
 
-    
+
+import tensorflow.keras.backend as K
 class PreprocessLayer(tf.keras.layers.Layer):
     def __init__(self):
         super(PreprocessLayer, self).__init__()
@@ -263,9 +258,6 @@ lip_center_idx = np.arange(len(SLIP)) + len(REYE)+len(LEYE)+len(NOSE)
 pose_center_idx = np.array([0,1,6,7]) + POSE_START
 center_idx = np.array(leye_center_idx.tolist()+reye_center_idx.tolist()+nose_center_idx.tolist()+lip_center_idx.tolist()+pose_center_idx.tolist())
 
-
-
-
 # Epsilon value for layer normalisation
 LAYER_NORM_EPS = 1e-6
 
@@ -276,7 +268,7 @@ HANDS_UNITS = 256
 POSE_UNITS = 256
 # final embedding and transformer embedding size
 UNITS = 256
-XYZ_UNITS = 384
+
 # Transformer
 NUM_BLOCKS = 2
 MLP_RATIO = 2
@@ -294,6 +286,225 @@ INIT_ZEROS = tf.keras.initializers.constant(0.0)
 GELU = tf.keras.activations.gelu
 
 
+# Transformer
+# Need to implement transformer from scratch as TFLite does not support the native TF implementation of MultiHeadAttention.
+
+
+# %% [markdown]
+# # Transformer
+# 
+# Need to implement transformer from scratch as TFLite does not support the native TF implementation of MultiHeadAttention.
+
+# %% [code] {"execution":{"iopub.status.busy":"2023-03-24T17:24:01.493824Z","iopub.execute_input":"2023-03-24T17:24:01.494532Z","iopub.status.idle":"2023-03-24T17:24:01.506371Z","shell.execute_reply.started":"2023-03-24T17:24:01.494458Z","shell.execute_reply":"2023-03-24T17:24:01.505108Z"}}
+# based on: https://stackoverflow.com/questions/67342988/verifying-the-implementation-of-multihead-attention-in-transformer
+# replaced softmax with softmax layer to support masked softmax
+def scaled_dot_product(q,k,v, softmax, attention_mask):
+    #calculates Q . K(transpose)
+    qkt = tf.matmul(q,k,transpose_b=True)
+    #caculates scaling factor
+    dk = tf.math.sqrt(tf.cast(q.shape[-1],dtype=tf.float32))
+    scaled_qkt = qkt/dk
+    softmax = softmax(scaled_qkt, mask=attention_mask)
+    
+    z = tf.matmul(softmax,v)
+    #shape: (m,Tx,depth), same shape as q,k,v
+    return z
+
+class MultiHeadAttention(tf.keras.layers.Layer):
+    def __init__(self,d_model,num_of_heads):
+        super(MultiHeadAttention,self).__init__()
+        self.d_model = d_model
+        self.num_of_heads = num_of_heads
+        self.depth = d_model//num_of_heads
+        self.wq = [tf.keras.layers.Dense(self.depth) for i in range(num_of_heads)]
+        self.wk = [tf.keras.layers.Dense(self.depth) for i in range(num_of_heads)]
+        self.wv = [tf.keras.layers.Dense(self.depth) for i in range(num_of_heads)]
+        self.wo = tf.keras.layers.Dense(d_model)
+        self.softmax = tf.keras.layers.Softmax()
+        
+    def call(self,x, attention_mask):
+        
+        multi_attn = []
+        for i in range(self.num_of_heads):
+            Q = self.wq[i](x)
+            K = self.wk[i](x)
+            V = self.wv[i](x)
+            multi_attn.append(scaled_dot_product(Q,K,V, self.softmax, attention_mask))
+            
+        multi_head = tf.concat(multi_attn,axis=-1)
+        multi_head_attention = self.wo(multi_head)
+        return multi_head_attention
+
+# %% [code] {"execution":{"iopub.status.busy":"2023-03-24T17:24:01.886612Z","iopub.execute_input":"2023-03-24T17:24:01.886981Z","iopub.status.idle":"2023-03-24T17:24:01.899889Z","shell.execute_reply.started":"2023-03-24T17:24:01.886946Z","shell.execute_reply":"2023-03-24T17:24:01.898849Z"}}
+# Full Transformer
+class Transformer(tf.keras.Model):
+    def __init__(self, num_blocks):
+        super(Transformer, self).__init__(name='transformer')
+        self.num_blocks = num_blocks
+    
+    def build(self, input_shape):
+        self.ln_1s = []
+        self.mhas = []
+        self.ln_2s = []
+        self.mlps = []
+        # Make Transformer Blocks
+        for i in range(self.num_blocks):
+            # First Layer Normalisation
+            self.ln_1s.append(tf.keras.layers.LayerNormalization(epsilon=LAYER_NORM_EPS))
+            # Multi Head Attention
+            self.mhas.append(MultiHeadAttention(UNITS, NUM_HEADS))
+            # Second Layer Normalisation
+            self.ln_2s.append(tf.keras.layers.LayerNormalization(epsilon=LAYER_NORM_EPS))
+            # Multi Layer Perception
+            self.mlps.append(tf.keras.Sequential([
+                tf.keras.layers.Dense(384 * MLP_RATIO, activation=GELU, kernel_initializer=INIT_GLOROT_UNIFORM),
+                LateDropout(MLP_DROPOUT_RATIO),
+                tf.keras.layers.Dense(UNITS, kernel_initializer=INIT_HE_UNIFORM),
+            ]))
+        
+    def call(self, x, attention_mask):
+        # Iterate input over transformer blocks
+        for ln_1, mha, ln_2, mlp in zip(self.ln_1s, self.mhas, self.ln_2s, self.mlps):
+            x1 = ln_1(x)
+            attention_output = mha(x1, attention_mask)
+            x2 = x1 + attention_output
+            x3 = ln_2(x2)
+            x3 = mlp(x3)
+            x = x3 + x2
+    
+        return x
+
+class LateDropout(tf.keras.layers.Layer):
+    def __init__(self, rate, noise_shape=None, start_step=160*N_EPOCHS//2, **kwargs):
+        super().__init__(**kwargs)
+        self.rate = rate
+        self.start_step = start_step
+        self.dropout = tf.keras.layers.Dropout(rate, noise_shape=noise_shape)
+
+    def build(self, input_shape):
+        super().build(input_shape)
+        agg = tf.VariableAggregation.ONLY_FIRST_REPLICA
+        self._train_counter = tf.Variable(0, dtype="int64", aggregation=agg, trainable=False)
+
+    def call(self, inputs, training=False):
+        if training:
+            x = tf.cond(self._train_counter < self.start_step, lambda:inputs,  lambda:self.dropout(inputs,training=training))
+            self._train_counter.assign_add(1)
+        else:
+            x = inputs
+        return x
+# %% [markdown]
+# # Landmark Embedding
+
+# %% [code] {"execution":{"iopub.status.busy":"2023-03-24T17:24:02.513568Z","iopub.execute_input":"2023-03-24T17:24:02.514655Z","iopub.status.idle":"2023-03-24T17:24:02.523575Z","shell.execute_reply.started":"2023-03-24T17:24:02.514603Z","shell.execute_reply":"2023-03-24T17:24:02.522523Z"}}
+class LandmarkEmbedding(tf.keras.Model):
+    def __init__(self, units, name):
+        super(LandmarkEmbedding, self).__init__(name=f'{name}_embedding')
+        self.units = units
+        
+    def build(self, input_shape):
+        # Embedding for missing landmark in frame, initizlied with zeros
+        self.empty_embedding = self.add_weight(
+            name=f'{self.name}_empty_embedding',
+            shape=[self.units],
+            initializer=INIT_ZEROS,
+        )
+        self.per_cls_embedding = tf.Variable(tf.zeros([self.units], dtype=tf.float32), name='per_cls_embedding')
+        
+        # Embedding
+        self.dense = tf.keras.Sequential([
+            tf.keras.layers.Dense(384, name=f'{self.name}_dense_1', use_bias=False, kernel_initializer=INIT_GLOROT_UNIFORM, activation=GELU),
+            tf.keras.layers.Dense(self.units, name=f'{self.name}_dense_2', use_bias=False, kernel_initializer=INIT_HE_UNIFORM),
+        ], name=f'{self.name}_dense')
+
+    def call(self, x):
+        return tf.where(
+                # Checks whether landmark is missing in frame
+                tf.reduce_sum(x, axis=2, keepdims=True) == 0,
+                # If so, the empty embedding is used
+                self.empty_embedding,
+                # Otherwise the landmark data is embedded
+                self.dense(x),
+            ) + self.per_cls_embedding
+
+# %% [markdown]
+# # Embedding
+
+# %% [code] {"execution":{"iopub.status.busy":"2023-03-24T17:24:03.177702Z","iopub.execute_input":"2023-03-24T17:24:03.178116Z","iopub.status.idle":"2023-03-24T17:24:03.191425Z","shell.execute_reply.started":"2023-03-24T17:24:03.178084Z","shell.execute_reply":"2023-03-24T17:24:03.190242Z"}}
+class Embedding(tf.keras.Model):
+    def __init__(self):
+        super(Embedding, self).__init__()
+        
+    def get_diffs(self, l):
+        S = l.shape[2]
+        other = tf.expand_dims(l, 3)
+        other = tf.repeat(other, S, axis=3)
+        other = tf.transpose(other, [0,1,3,2])
+        diffs = tf.expand_dims(l, 3) - other
+        diffs = tf.reshape(diffs, [-1, INPUT_SIZE, S*S])
+        return diffs
+
+    def build(self, input_shape):
+        # Positional Embedding, initialized with zeros
+        self.positional_embedding = tf.keras.layers.Embedding(INPUT_SIZE+1, UNITS, embeddings_initializer=INIT_ZEROS)
+        # Embedding layer for Landmarks
+        self.motion_embedding = LandmarkEmbedding(MOTION_UNITS, 'motion')
+        
+        self.lips_embedding = LandmarkEmbedding(LIPS_UNITS, 'lips')
+        self.left_hand_embedding = LandmarkEmbedding(HANDS_UNITS, 'left_hand')
+        self.right_hand_embedding = LandmarkEmbedding(HANDS_UNITS, 'right_hand')
+        self.pose_embedding = LandmarkEmbedding(POSE_UNITS, 'pose')
+        # Landmark Weights
+        
+        self.cls_embedding = tf.Variable(tf.zeros([UNITS], dtype=tf.float32), name='cls_embedding')
+        # self.landmark_weights = tf.Variable(tf.zeros([4], dtype=tf.float32), name='landmark_weights')
+        # Fully Connected Layers for combined landmarks
+        self.fc = tf.keras.Sequential([
+            tf.keras.layers.Dense(384, name='fully_connected_1', use_bias=False, kernel_initializer=INIT_GLOROT_UNIFORM, activation=GELU),
+            tf.keras.layers.Dense(UNITS, name='fully_connected_2', use_bias=False, kernel_initializer=INIT_HE_UNIFORM),
+        ], name='fc')
+        self.weight = tf.keras.layers.Dense(1, name=f'{self.name}_dense_3', use_bias=False, kernel_initializer=INIT_HE_UNIFORM)
+        self.dropout = LateDropout(0.2)
+
+    def call(self, lips0, left_hand0, right_hand0, pose0, motion0, non_empty_frame_idxs, training=False):
+        motion_embedding = self.motion_embedding(motion0)
+        # Lips
+        lips_embedding = self.lips_embedding(lips0)
+        w_lips = self.weight(lips_embedding)
+        # Left Hand
+        left_hand_embedding = self.left_hand_embedding(left_hand0)
+        w_left_hand = self.weight(left_hand_embedding)
+        # Right Hand
+        right_hand_embedding = self.right_hand_embedding(right_hand0)
+        w_right_hand = self.weight(right_hand_embedding)
+        # Pose
+        # [bs N 2]  # [bs N_frame N 2] # [bs N_frame//SIZE, SIZE, N, 2]
+        pose_embedding = self.pose_embedding(pose0)
+        w_pose = self.weight(pose_embedding)
+        # Merge Embeddings of all landmarks with mean pooling
+        x = tf.stack((lips_embedding, left_hand_embedding, right_hand_embedding, pose_embedding), axis=3) #[bs, units, 32]
+        landmark_weights = tf.stack((w_lips, w_left_hand, w_right_hand, w_pose), axis=3) # [bs, 4]
+        # Merge Landmarks with trainable attention weights
+        x = x * tf.nn.softmax(landmark_weights, axis=3)
+        x = tf.reduce_sum(x, axis=3)
+        x = tf.concat((x, motion_embedding), axis=-1)
+        # Fully Connected Layers
+        x = self.fc(x)
+        x = self.dropout(x) 
+
+        
+        # Add Positional Embedding
+        normalised_non_empty_frame_idxs = tf.where(
+            tf.math.equal(non_empty_frame_idxs, -1.0),
+            INPUT_SIZE,
+            tf.cast(
+                non_empty_frame_idxs / tf.reduce_max(non_empty_frame_idxs, axis=1, keepdims=True) * INPUT_SIZE,
+                tf.int32,
+            ),
+        )
+        x = x + self.positional_embedding(normalised_non_empty_frame_idxs)
+        x = x + self.cls_embedding
+        return x
 
 # %% [code] {"execution":{"iopub.status.busy":"2023-03-24T17:24:03.552905Z","iopub.execute_input":"2023-03-24T17:24:03.553892Z","iopub.status.idle":"2023-03-24T17:24:03.560104Z","shell.execute_reply.started":"2023-03-24T17:24:03.553842Z","shell.execute_reply":"2023-03-24T17:24:03.558879Z"}}
 def loss_fn(y_true, y_pred):
@@ -303,214 +514,6 @@ def loss_fn(y_true, y_pred):
 
 # %% [code] {"execution":{"iopub.status.busy":"2023-03-24T17:24:04.095699Z","iopub.execute_input":"2023-03-24T17:24:04.096388Z","iopub.status.idle":"2023-03-24T17:24:04.113226Z","shell.execute_reply.started":"2023-03-24T17:24:04.096352Z","shell.execute_reply":"2023-03-24T17:24:04.112053Z"}}
 def get_model():
-
-    def scaled_dot_product(q,k,v, softmax, attention_mask):
-        #calculates Q . K(transpose)
-        qkt = tf.matmul(q,k,transpose_b=True)
-        #caculates scaling factor
-        dk = tf.math.sqrt(tf.cast(q.shape[-1],dtype=tf.float32))
-        scaled_qkt = qkt/dk
-        softmax = softmax(scaled_qkt, mask=attention_mask)
-
-        z = tf.matmul(softmax,v)
-        #shape: (m,Tx,depth), same shape as q,k,v
-        return z
-
-    class MultiHeadAttention(tf.keras.layers.Layer):
-        def __init__(self,d_model,num_of_heads):
-            super(MultiHeadAttention,self).__init__()
-            self.d_model = d_model
-            self.num_of_heads = num_of_heads
-            self.depth = d_model//num_of_heads
-            self.wq = [tf.keras.layers.Dense(self.depth) for i in range(num_of_heads)]
-            self.wk = [tf.keras.layers.Dense(self.depth) for i in range(num_of_heads)]
-            self.wv = [tf.keras.layers.Dense(self.depth) for i in range(num_of_heads)]
-            self.wo = tf.keras.layers.Dense(d_model)
-            self.softmax = tf.keras.layers.Softmax()
-
-        def call(self,x, attention_mask):
-
-            multi_attn = []
-            for i in range(self.num_of_heads):
-                Q = self.wq[i](x)
-                K = self.wk[i](x)
-                V = self.wv[i](x)
-                multi_attn.append(scaled_dot_product(Q,K,V, self.softmax, attention_mask))
-
-            multi_head = tf.concat(multi_attn,axis=-1)
-            multi_head_attention = self.wo(multi_head)
-            return multi_head_attention
-
-    # %% [code] {"execution":{"iopub.status.busy":"2023-03-24T17:24:01.886612Z","iopub.execute_input":"2023-03-24T17:24:01.886981Z","iopub.status.idle":"2023-03-24T17:24:01.899889Z","shell.execute_reply.started":"2023-03-24T17:24:01.886946Z","shell.execute_reply":"2023-03-24T17:24:01.898849Z"}}
-    # Full Transformer
-    class Transformer(tf.keras.Model):
-        def __init__(self, num_blocks):
-            super(Transformer, self).__init__(name='transformer')
-            self.num_blocks = num_blocks
-
-        def build(self, input_shape):
-            self.ln_1s = []
-            self.mhas = []
-            self.ln_2s = []
-            self.mlps = []
-            # Make Transformer Blocks
-            for i in range(self.num_blocks):
-                # First Layer Normalisation
-                self.ln_1s.append(tf.keras.layers.LayerNormalization(epsilon=LAYER_NORM_EPS))
-                # Multi Head Attention
-                self.mhas.append(MultiHeadAttention(UNITS, NUM_HEADS))
-                # Second Layer Normalisation
-                self.ln_2s.append(tf.keras.layers.LayerNormalization(epsilon=LAYER_NORM_EPS))
-                # Multi Layer Perception
-                self.mlps.append(tf.keras.Sequential([
-                    tf.keras.layers.Dense(384 * MLP_RATIO, activation=GELU, kernel_initializer=INIT_GLOROT_UNIFORM),
-                    LateDropout(MLP_DROPOUT_RATIO),
-                    tf.keras.layers.Dense(UNITS, kernel_initializer=INIT_HE_UNIFORM),
-                ]))
-
-        def call(self, x, attention_mask):
-            # Iterate input over transformer blocks
-            for ln_1, mha, ln_2, mlp in zip(self.ln_1s, self.mhas, self.ln_2s, self.mlps):
-                x1 = ln_1(x)
-                attention_output = mha(x1, attention_mask)
-                x2 = x1 + attention_output
-                x3 = ln_2(x2)
-                x3 = mlp(x3)
-                x = x3 + x2
-
-            return x
-
-    class LateDropout(tf.keras.layers.Layer):
-        def __init__(self, rate, noise_shape=None, start_step=160*N_EPOCHS//2, **kwargs):
-            super().__init__(**kwargs)
-            self.rate = rate
-            self.start_step = start_step
-            self.dropout = tf.keras.layers.Dropout(rate, noise_shape=noise_shape)
-
-        def build(self, input_shape):
-            super().build(input_shape)
-            agg = tf.VariableAggregation.ONLY_FIRST_REPLICA
-            self._train_counter = tf.Variable(0, dtype="int64", aggregation=agg, trainable=False)
-
-        def call(self, inputs, training=False):
-            if training:
-                x = tf.cond(self._train_counter < self.start_step, lambda:inputs,  lambda:self.dropout(inputs,training=training))
-                self._train_counter.assign_add(1)
-            else:
-                x = inputs
-            return x
-    # %% [markdown]
-    # # Landmark Embedding
-
-    # %% [code] {"execution":{"iopub.status.busy":"2023-03-24T17:24:02.513568Z","iopub.execute_input":"2023-03-24T17:24:02.514655Z","iopub.status.idle":"2023-03-24T17:24:02.523575Z","shell.execute_reply.started":"2023-03-24T17:24:02.514603Z","shell.execute_reply":"2023-03-24T17:24:02.522523Z"}}
-    class LandmarkEmbedding(tf.keras.Model):
-        def __init__(self, units, name):
-            super(LandmarkEmbedding, self).__init__(name=f'{name}_embedding')
-            self.units = units
-
-        def build(self, input_shape):
-            # Embedding for missing landmark in frame, initizlied with zeros
-            self.empty_embedding = self.add_weight(
-                name=f'{self.name}_empty_embedding',
-                shape=[self.units],
-                initializer=INIT_ZEROS,
-            )
-            self.per_cls_embedding = tf.Variable(tf.zeros([self.units], dtype=tf.float32), name='per_cls_embedding')
-
-            # Embedding
-            self.dense = tf.keras.Sequential([
-                tf.keras.layers.Dense(384, name=f'{self.name}_dense_1', use_bias=False, kernel_initializer=INIT_GLOROT_UNIFORM, activation=GELU),
-                tf.keras.layers.Dense(self.units, name=f'{self.name}_dense_2', use_bias=False, kernel_initializer=INIT_HE_UNIFORM),
-            ], name=f'{self.name}_dense')
-
-        def call(self, x):
-            return tf.where(
-                    # Checks whether landmark is missing in frame
-                    tf.reduce_sum(x, axis=2, keepdims=True) == 0,
-                    # If so, the empty embedding is used
-                    self.empty_embedding,
-                    # Otherwise the landmark data is embedded
-                    self.dense(x),
-                ) + self.per_cls_embedding
-
-    # %% [markdown]
-    # # Embedding
-
-    # %% [code] {"execution":{"iopub.status.busy":"2023-03-24T17:24:03.177702Z","iopub.execute_input":"2023-03-24T17:24:03.178116Z","iopub.status.idle":"2023-03-24T17:24:03.191425Z","shell.execute_reply.started":"2023-03-24T17:24:03.178084Z","shell.execute_reply":"2023-03-24T17:24:03.190242Z"}}
-    class Embedding(tf.keras.Model):
-        def __init__(self):
-            super(Embedding, self).__init__()
-
-        def get_diffs(self, l):
-            S = l.shape[2]
-            other = tf.expand_dims(l, 3)
-            other = tf.repeat(other, S, axis=3)
-            other = tf.transpose(other, [0,1,3,2])
-            diffs = tf.expand_dims(l, 3) - other
-            diffs = tf.reshape(diffs, [-1, INPUT_SIZE, S*S])
-            return diffs
-
-        def build(self, input_shape):
-            # Positional Embedding, initialized with zeros
-            self.positional_embedding = tf.keras.layers.Embedding(INPUT_SIZE+1, UNITS, embeddings_initializer=INIT_ZEROS)
-            # Embedding layer for Landmarks
-            self.motion_embedding = LandmarkEmbedding(MOTION_UNITS, 'motion')
-
-            self.lips_embedding = LandmarkEmbedding(LIPS_UNITS, 'lips')
-            self.left_hand_embedding = LandmarkEmbedding(HANDS_UNITS, 'left_hand')
-            self.right_hand_embedding = LandmarkEmbedding(HANDS_UNITS, 'right_hand')
-            self.pose_embedding = LandmarkEmbedding(POSE_UNITS, 'pose')
-            # Landmark Weights
-
-            self.cls_embedding = tf.Variable(tf.zeros([UNITS], dtype=tf.float32), name='cls_embedding')
-            # self.landmark_weights = tf.Variable(tf.zeros([4], dtype=tf.float32), name='landmark_weights')
-            # Fully Connected Layers for combined landmarks
-            self.fc = tf.keras.Sequential([
-                tf.keras.layers.Dense(384, name='fully_connected_1', use_bias=False, kernel_initializer=INIT_GLOROT_UNIFORM, activation=GELU),
-                tf.keras.layers.Dense(UNITS, name='fully_connected_2', use_bias=False, kernel_initializer=INIT_HE_UNIFORM),
-            ], name='fc')
-            self.weight = tf.keras.layers.Dense(1, name=f'{self.name}_dense_3', use_bias=False, kernel_initializer=INIT_HE_UNIFORM)
-            self.dropout = LateDropout(0.2)
-
-        def call(self, lips0, left_hand0, right_hand0, pose0, motion0, non_empty_frame_idxs, training=False):
-            motion_embedding = self.motion_embedding(motion0)
-            # Lips
-            lips_embedding = self.lips_embedding(lips0)
-            w_lips = self.weight(lips_embedding)
-            # Left Hand
-            left_hand_embedding = self.left_hand_embedding(left_hand0)
-            w_left_hand = self.weight(left_hand_embedding)
-            # Right Hand
-            right_hand_embedding = self.right_hand_embedding(right_hand0)
-            w_right_hand = self.weight(right_hand_embedding)
-            # Pose
-            # [bs N 2]  # [bs N_frame N 2] # [bs N_frame//SIZE, SIZE, N, 2]
-            pose_embedding = self.pose_embedding(pose0)
-            w_pose = self.weight(pose_embedding)
-            # Merge Embeddings of all landmarks with mean pooling
-            x = tf.stack((lips_embedding, left_hand_embedding, right_hand_embedding, pose_embedding), axis=3) #[bs, units, 32]
-            landmark_weights = tf.stack((w_lips, w_left_hand, w_right_hand, w_pose), axis=3) # [bs, 4]
-            # Merge Landmarks with trainable attention weights
-            x = x * tf.nn.softmax(landmark_weights, axis=3)
-            x = tf.reduce_sum(x, axis=3)
-            x = tf.concat((x, motion_embedding), axis=-1)
-            # Fully Connected Layers
-            x = self.fc(x)
-            x = self.dropout(x) 
-
-
-            # Add Positional Embedding
-            normalised_non_empty_frame_idxs = tf.where(
-                tf.math.equal(non_empty_frame_idxs, -1.0),
-                INPUT_SIZE,
-                tf.cast(
-                    non_empty_frame_idxs / tf.reduce_max(non_empty_frame_idxs, axis=1, keepdims=True) * INPUT_SIZE,
-                    tf.int32,
-                ),
-            )
-            x = x + self.positional_embedding(normalised_non_empty_frame_idxs)
-            x = x + self.cls_embedding
-            return x
     # Inputs
     frames = tf.keras.layers.Input([INPUT_SIZE, N_COLS, N_DIMS], dtype=tf.float32, name='frames')
     non_empty_frame_idxs = tf.keras.layers.Input([INPUT_SIZE], dtype=tf.float32, name='non_empty_frame_idxs')
@@ -600,250 +603,10 @@ def get_model():
     return model
 
 
-def get_model_global():
-    def scaled_dot_product(q,k,v, softmax, attention_mask):
-        #calculates Q . K(transpose)
-        qkt = tf.matmul(q,k,transpose_b=True)
-        #caculates scaling factor
-        dk = tf.math.sqrt(tf.cast(q.shape[-1],dtype=tf.float32))
-        scaled_qkt = qkt/dk
-        softmax = softmax(scaled_qkt, mask=attention_mask)
-
-        z = tf.matmul(softmax,v)
-        #shape: (m,Tx,depth), same shape as q,k,v
-        return z
-
-    class MultiHeadAttention(tf.keras.layers.Layer):
-        def __init__(self,d_model,num_of_heads):
-            super(MultiHeadAttention,self).__init__()
-            self.d_model = d_model
-            self.num_of_heads = num_of_heads
-            self.depth = d_model//num_of_heads
-            self.wq = [tf.keras.layers.Dense(self.depth) for i in range(num_of_heads)]
-            self.wk = [tf.keras.layers.Dense(self.depth) for i in range(num_of_heads)]
-            self.wv = [tf.keras.layers.Dense(self.depth) for i in range(num_of_heads)]
-            self.wo = tf.keras.layers.Dense(d_model)
-            self.softmax = tf.keras.layers.Softmax()
-
-        def call(self,x, attention_mask):
-
-            multi_attn = []
-            for i in range(self.num_of_heads):
-                Q = self.wq[i](x)
-                K = self.wk[i](x)
-                V = self.wv[i](x)
-                multi_attn.append(scaled_dot_product(Q,K,V, self.softmax, attention_mask))
-
-            multi_head = tf.concat(multi_attn,axis=-1)
-            multi_head_attention = self.wo(multi_head)
-            return multi_head_attention
-
-    # %% [code] {"execution":{"iopub.status.busy":"2023-03-24T17:24:01.886612Z","iopub.execute_input":"2023-03-24T17:24:01.886981Z","iopub.status.idle":"2023-03-24T17:24:01.899889Z","shell.execute_reply.started":"2023-03-24T17:24:01.886946Z","shell.execute_reply":"2023-03-24T17:24:01.898849Z"}}
-    # Full Transformer
-    class Transformer(tf.keras.Model):
-        def __init__(self, num_blocks):
-            super(Transformer, self).__init__(name='transformer')
-            self.num_blocks = num_blocks
-
-        def build(self, input_shape):
-            self.ln_1s = []
-            self.mhas = []
-            self.ln_2s = []
-            self.mlps = []
-            # Make Transformer Blocks
-            for i in range(self.num_blocks):
-                # First Layer Normalisation
-                self.ln_1s.append(tf.keras.layers.LayerNormalization(epsilon=LAYER_NORM_EPS))
-                # Multi Head Attention
-                self.mhas.append(MultiHeadAttention(UNITS, NUM_HEADS))
-                # Second Layer Normalisation
-                self.ln_2s.append(tf.keras.layers.LayerNormalization(epsilon=LAYER_NORM_EPS))
-                # Multi Layer Perception
-                self.mlps.append(tf.keras.Sequential([
-                    tf.keras.layers.Dense(384 * MLP_RATIO, activation=GELU, kernel_initializer=INIT_GLOROT_UNIFORM),
-                    LateDropout(MLP_DROPOUT_RATIO),
-                    tf.keras.layers.Dense(UNITS, kernel_initializer=INIT_HE_UNIFORM),
-                ]))
-
-        def call(self, x, attention_mask):
-            # Iterate input over transformer blocks
-            for ln_1, mha, ln_2, mlp in zip(self.ln_1s, self.mhas, self.ln_2s, self.mlps):
-                x1 = ln_1(x)
-                attention_output = mha(x1, attention_mask)
-                x2 = x1 + attention_output
-                x3 = ln_2(x2)
-                x3 = mlp(x3)
-                x = x3 + x2
-
-            return x
-
-    class LateDropout(tf.keras.layers.Layer):
-        def __init__(self, rate, noise_shape=None, start_step=160*N_EPOCHS//2, **kwargs):
-            super().__init__(**kwargs)
-            self.rate = rate
-            self.start_step = start_step
-            self.dropout = tf.keras.layers.Dropout(rate, noise_shape=noise_shape)
-
-        def build(self, input_shape):
-            super().build(input_shape)
-            agg = tf.VariableAggregation.ONLY_FIRST_REPLICA
-            self._train_counter = tf.Variable(0, dtype="int64", aggregation=agg, trainable=False)
-
-        def call(self, inputs, training=False):
-            if training:
-                x = tf.cond(self._train_counter < self.start_step, lambda:inputs,  lambda:self.dropout(inputs,training=training))
-                self._train_counter.assign_add(1)
-            else:
-                x = inputs
-            return x
-    # %% [markdown]
-    # # Landmark Embedding
-
-    # %% [code] {"execution":{"iopub.status.busy":"2023-03-24T17:24:02.513568Z","iopub.execute_input":"2023-03-24T17:24:02.514655Z","iopub.status.idle":"2023-03-24T17:24:02.523575Z","shell.execute_reply.started":"2023-03-24T17:24:02.514603Z","shell.execute_reply":"2023-03-24T17:24:02.522523Z"}}
-    class LandmarkEmbedding(tf.keras.Model):
-        def __init__(self, units, name):
-            super(LandmarkEmbedding, self).__init__(name=f'{name}_embedding')
-            self.units = units
-
-        def build(self, input_shape):
-            # Embedding for missing landmark in frame, initizlied with zeros
-            self.empty_embedding = self.add_weight(
-                name=f'{self.name}_empty_embedding',
-                shape=[self.units],
-                initializer=INIT_ZEROS,
-            )
-            self.per_cls_embedding = tf.Variable(tf.zeros([self.units], dtype=tf.float32), name='per_cls_embedding')
-
-            # Embedding
-            self.dense = tf.keras.Sequential([
-                tf.keras.layers.Dense(384, name=f'{self.name}_dense_1', use_bias=False, kernel_initializer=INIT_GLOROT_UNIFORM, activation=GELU),
-                tf.keras.layers.Dense(self.units, name=f'{self.name}_dense_2', use_bias=False, kernel_initializer=INIT_HE_UNIFORM),
-            ], name=f'{self.name}_dense')
-
-        def call(self, x):
-            return tf.where(
-                    # Checks whether landmark is missing in frame
-                    tf.reduce_sum(x, axis=2, keepdims=True) == 0,
-                    # If so, the empty embedding is used
-                    self.empty_embedding,
-                    # Otherwise the landmark data is embedded
-                    self.dense(x),
-                ) + self.per_cls_embedding
-
-    # %% [markdown]
-    # # Embedding
-
-    # %% [code] {"execution":{"iopub.status.busy":"2023-03-24T17:24:03.177702Z","iopub.execute_input":"2023-03-24T17:24:03.178116Z","iopub.status.idle":"2023-03-24T17:24:03.191425Z","shell.execute_reply.started":"2023-03-24T17:24:03.178084Z","shell.execute_reply":"2023-03-24T17:24:03.190242Z"}}
-    class Embedding(tf.keras.Model):
-        def __init__(self):
-            super(Embedding, self).__init__()
-
-        def get_diffs(self, l):
-            S = l.shape[2]
-            other = tf.expand_dims(l, 3)
-            other = tf.repeat(other, S, axis=3)
-            other = tf.transpose(other, [0,1,3,2])
-            diffs = tf.expand_dims(l, 3) - other
-            diffs = tf.reshape(diffs, [-1, INPUT_SIZE, S*S])
-            return diffs
-
-        def build(self, input_shape):
-            # Positional Embedding, initialized with zeros
-            self.positional_embedding = tf.keras.layers.Embedding(INPUT_SIZE+1, UNITS, embeddings_initializer=INIT_ZEROS)
-            # Embedding layer for Landmarks
-            self.motion_embedding = LandmarkEmbedding(MOTION_UNITS, 'motion')
-            self.xyz_embedding = LandmarkEmbedding(XYZ_UNITS, 'xyz')
-            # Landmark Weights
-
-            self.cls_embedding = tf.Variable(tf.zeros([UNITS], dtype=tf.float32), name='cls_embedding')
-            # self.landmark_weights = tf.Variable(tf.zeros([4], dtype=tf.float32), name='landmark_weights')
-            # Fully Connected Layers for combined landmarks
-            self.fc = tf.keras.Sequential([
-                tf.keras.layers.Dense(384, name='fully_connected_1', use_bias=False, kernel_initializer=INIT_GLOROT_UNIFORM, activation=GELU),
-                tf.keras.layers.Dense(UNITS, name='fully_connected_2', use_bias=False, kernel_initializer=INIT_HE_UNIFORM),
-            ], name='fc')
-            # self.weight = tf.keras.layers.Dense(1, name=f'{self.name}_dense_3', use_bias=False, kernel_initializer=INIT_HE_UNIFORM)
-            self.dropout = LateDropout(0.2)
-
-        def call(self, xyz0, motion0, non_empty_frame_idxs, training=False):
-            motion_embedding = self.motion_embedding(motion0)
-            xyz_embedding = self.xyz_embedding(xyz0)
-            x = tf.concat((xyz_embedding, motion_embedding), axis=-1)
-            # Fully Connected Layers
-            x = self.fc(x)
-            x = self.dropout(x) 
-
-
-            # Add Positional Embedding
-            normalised_non_empty_frame_idxs = tf.where(
-                tf.math.equal(non_empty_frame_idxs, -1.0),
-                INPUT_SIZE,
-                tf.cast(
-                    non_empty_frame_idxs / tf.reduce_max(non_empty_frame_idxs, axis=1, keepdims=True) * INPUT_SIZE,
-                    tf.int32,
-                ),
-            )
-            x = x + self.positional_embedding(normalised_non_empty_frame_idxs)
-            x = x + self.cls_embedding
-            return x
-    # Inputs
-    frames = tf.keras.layers.Input([INPUT_SIZE, N_COLS, N_DIMS], dtype=tf.float32, name='frames')
-    non_empty_frame_idxs = tf.keras.layers.Input([INPUT_SIZE], dtype=tf.float32, name='non_empty_frame_idxs')
-    # Padding Mask
-    mask = tf.cast(tf.math.not_equal(non_empty_frame_idxs, -1), tf.float32)
-    mask = tf.expand_dims(mask, axis=2)
-    
-    """
-        left_hand: 468:489
-        pose: 489:522
-        right_hand: 522:543
-    """
-    x = frames
-    x = tf.slice(x, [0,0,0,0], [-1,INPUT_SIZE, N_COLS, 2])
-    left = np.arange(INPUT_SIZE-1)
-    right = np.arange(1, INPUT_SIZE)
-    motion = tf.pad(tf.gather(x, left, axis=1) - tf.gather(x, right, axis=1), [[0,0],[0,1],[0,0],[0,0]])
-    motion = tf.where(tf.math.equal(x, 0.0), 0.0, motion)
-    motion_dist = tf.math.sqrt(tf.math.reduce_mean(motion**2, axis=-1, keepdims=True))
-    motion = tf.concat((motion, motion_dist), axis=-1)
-    motion = tf.reshape(motion, [-1, INPUT_SIZE, 106*3])
-
-    xyz = tf.reshape(x, [-1, INPUT_SIZE, N_COLS*2])
-
-    x = Embedding()(xyz, motion, non_empty_frame_idxs)
-    
-    # Encoder Transformer Blocks
-    x = Transformer(NUM_BLOCKS)(x, mask) + x
-    
-    # Pooling
-    x = tf.reduce_sum(x * mask, axis=1) / tf.reduce_sum(mask, axis=1)
-    # Classifier Dropout
-    x = LateDropout(CLASSIFIER_DROPOUT_RATIO)(x)
-
-    # Classification Layer
-    x = tf.keras.layers.Dense(NUM_CLASSES, activation=tf.keras.activations.softmax, kernel_initializer=INIT_GLOROT_UNIFORM)(x)
-    
-    outputs = x
-    
-    # Create Tensorflow Model
-    model = tf.keras.models.Model(inputs=[frames, non_empty_frame_idxs], outputs=outputs)
-    
-    # Adam Optimizer with weight decay
-    optimizer = tf.keras.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-5, clipnorm=1.0)
-
-    # TopK Metrics
-    metrics = [
-        tf.keras.metrics.SparseCategoricalAccuracy(name='acc'),
-        tf.keras.metrics.SparseTopKCategoricalAccuracy(k=5, name='top_5_acc'),
-        tf.keras.metrics.SparseTopKCategoricalAccuracy(k=10, name='top_10_acc'),
-    ]
-    
-    model.compile(loss=loss_fn, optimizer=optimizer, metrics=metrics)
-    
-    return model
-
 tf.keras.backend.clear_session()
 model = get_model()
+
+print(model.summary())
 
 
 from tensorflow.keras.layers import (
@@ -857,137 +620,6 @@ from tensorflow.keras.models import Sequential, model_from_json
 
 
 def get_conv1d_model():
-    class LateDropout(tf.keras.layers.Layer):
-        def __init__(self, rate, noise_shape=None, start_step=160*N_EPOCHS//2, **kwargs):
-            super().__init__(**kwargs)
-            self.rate = rate
-            self.start_step = start_step
-            self.dropout = tf.keras.layers.Dropout(rate, noise_shape=noise_shape)
-
-        def build(self, input_shape):
-            super().build(input_shape)
-            agg = tf.VariableAggregation.ONLY_FIRST_REPLICA
-            self._train_counter = tf.Variable(0, dtype="int64", aggregation=agg, trainable=False)
-
-        def call(self, inputs, training=False):
-            if training:
-                x = tf.cond(self._train_counter < self.start_step, lambda:inputs,  lambda:self.dropout(inputs,training=training))
-                self._train_counter.assign_add(1)
-            else:
-                x = inputs
-            return x
-    # %% [markdown]
-    # # Landmark Embedding
-
-    # %% [code] {"execution":{"iopub.status.busy":"2023-03-24T17:24:02.513568Z","iopub.execute_input":"2023-03-24T17:24:02.514655Z","iopub.status.idle":"2023-03-24T17:24:02.523575Z","shell.execute_reply.started":"2023-03-24T17:24:02.514603Z","shell.execute_reply":"2023-03-24T17:24:02.522523Z"}}
-    class LandmarkEmbedding(tf.keras.Model):
-        def __init__(self, units, name):
-            super(LandmarkEmbedding, self).__init__(name=f'{name}_embedding')
-            self.units = units
-
-        def build(self, input_shape):
-            # Embedding for missing landmark in frame, initizlied with zeros
-            self.empty_embedding = self.add_weight(
-                name=f'{self.name}_empty_embedding',
-                shape=[self.units],
-                initializer=INIT_ZEROS,
-            )
-            self.per_cls_embedding = tf.Variable(tf.zeros([self.units], dtype=tf.float32), name='per_cls_embedding')
-
-            # Embedding
-            self.dense = tf.keras.Sequential([
-                tf.keras.layers.Dense(384, name=f'{self.name}_dense_1', use_bias=False, kernel_initializer=INIT_GLOROT_UNIFORM, activation=GELU),
-                tf.keras.layers.Dense(self.units, name=f'{self.name}_dense_2', use_bias=False, kernel_initializer=INIT_HE_UNIFORM),
-            ], name=f'{self.name}_dense')
-
-        def call(self, x):
-            return tf.where(
-                    # Checks whether landmark is missing in frame
-                    tf.reduce_sum(x, axis=2, keepdims=True) == 0,
-                    # If so, the empty embedding is used
-                    self.empty_embedding,
-                    # Otherwise the landmark data is embedded
-                    self.dense(x),
-                ) + self.per_cls_embedding
-
-    # %% [markdown]
-    # # Embedding
-
-    # %% [code] {"execution":{"iopub.status.busy":"2023-03-24T17:24:03.177702Z","iopub.execute_input":"2023-03-24T17:24:03.178116Z","iopub.status.idle":"2023-03-24T17:24:03.191425Z","shell.execute_reply.started":"2023-03-24T17:24:03.178084Z","shell.execute_reply":"2023-03-24T17:24:03.190242Z"}}
-    class Embedding(tf.keras.Model):
-        def __init__(self):
-            super(Embedding, self).__init__()
-
-        def get_diffs(self, l):
-            S = l.shape[2]
-            other = tf.expand_dims(l, 3)
-            other = tf.repeat(other, S, axis=3)
-            other = tf.transpose(other, [0,1,3,2])
-            diffs = tf.expand_dims(l, 3) - other
-            diffs = tf.reshape(diffs, [-1, INPUT_SIZE, S*S])
-            return diffs
-
-        def build(self, input_shape):
-            # Positional Embedding, initialized with zeros
-            self.positional_embedding = tf.keras.layers.Embedding(INPUT_SIZE+1, UNITS, embeddings_initializer=INIT_ZEROS)
-            # Embedding layer for Landmarks
-            self.motion_embedding = LandmarkEmbedding(MOTION_UNITS, 'motion')
-
-            self.lips_embedding = LandmarkEmbedding(LIPS_UNITS, 'lips')
-            self.left_hand_embedding = LandmarkEmbedding(HANDS_UNITS, 'left_hand')
-            self.right_hand_embedding = LandmarkEmbedding(HANDS_UNITS, 'right_hand')
-            self.pose_embedding = LandmarkEmbedding(POSE_UNITS, 'pose')
-            # Landmark Weights
-
-            self.cls_embedding = tf.Variable(tf.zeros([UNITS], dtype=tf.float32), name='cls_embedding')
-            # self.landmark_weights = tf.Variable(tf.zeros([4], dtype=tf.float32), name='landmark_weights')
-            # Fully Connected Layers for combined landmarks
-            self.fc = tf.keras.Sequential([
-                tf.keras.layers.Dense(384, name='fully_connected_1', use_bias=False, kernel_initializer=INIT_GLOROT_UNIFORM, activation=GELU),
-                tf.keras.layers.Dense(UNITS, name='fully_connected_2', use_bias=False, kernel_initializer=INIT_HE_UNIFORM),
-            ], name='fc')
-            self.weight = tf.keras.layers.Dense(1, name=f'{self.name}_dense_3', use_bias=False, kernel_initializer=INIT_HE_UNIFORM)
-            self.dropout = LateDropout(0.2)
-
-        def call(self, lips0, left_hand0, right_hand0, pose0, motion0, non_empty_frame_idxs, training=False):
-            motion_embedding = self.motion_embedding(motion0)
-            # Lips
-            lips_embedding = self.lips_embedding(lips0)
-            w_lips = self.weight(lips_embedding)
-            # Left Hand
-            left_hand_embedding = self.left_hand_embedding(left_hand0)
-            w_left_hand = self.weight(left_hand_embedding)
-            # Right Hand
-            right_hand_embedding = self.right_hand_embedding(right_hand0)
-            w_right_hand = self.weight(right_hand_embedding)
-            # Pose
-            # [bs N 2]  # [bs N_frame N 2] # [bs N_frame//SIZE, SIZE, N, 2]
-            pose_embedding = self.pose_embedding(pose0)
-            w_pose = self.weight(pose_embedding)
-            # Merge Embeddings of all landmarks with mean pooling
-            x = tf.stack((lips_embedding, left_hand_embedding, right_hand_embedding, pose_embedding), axis=3) #[bs, units, 32]
-            landmark_weights = tf.stack((w_lips, w_left_hand, w_right_hand, w_pose), axis=3) # [bs, 4]
-            # Merge Landmarks with trainable attention weights
-            x = x * tf.nn.softmax(landmark_weights, axis=3)
-            x = tf.reduce_sum(x, axis=3)
-            x = tf.concat((x, motion_embedding), axis=-1)
-            # Fully Connected Layers
-            x = self.fc(x)
-            x = self.dropout(x) 
-
-
-            # Add Positional Embedding
-            normalised_non_empty_frame_idxs = tf.where(
-                tf.math.equal(non_empty_frame_idxs, -1.0),
-                INPUT_SIZE,
-                tf.cast(
-                    non_empty_frame_idxs / tf.reduce_max(non_empty_frame_idxs, axis=1, keepdims=True) * INPUT_SIZE,
-                    tf.int32,
-                ),
-            )
-            x = x + self.positional_embedding(normalised_non_empty_frame_idxs)
-            x = x + self.cls_embedding
-            return x
     # Inputs
     frames = tf.keras.layers.Input([INPUT_SIZE, N_COLS, N_DIMS], dtype=tf.float32, name='frames')
     non_empty_frame_idxs = tf.keras.layers.Input([INPUT_SIZE], dtype=tf.float32, name='non_empty_frame_idxs')
@@ -1102,10 +734,12 @@ def get_conv1d_model():
     return model
 
 
+
 class PreprocessLayerV0(tf.keras.layers.Layer):
-    def __init__(self, max_len):
+    def __init__(self, max_len, r_long):
         super(PreprocessLayerV0, self).__init__()
         self._max_len = max_len
+        self._r_long = r_long
         
         self.REF = [500, 501, 512, 513, 159,  386, 13,]
 
@@ -1120,7 +754,18 @@ class PreprocessLayerV0(tf.keras.layers.Layer):
         self.LHAND = np.arange(468, 489).tolist()
         self.RHAND = np.arange(522, 543).tolist()
         self.POSE = np.arange(500, 512).tolist()
-        self.LPOSE = [(i + 1) if (n % 2 == 0) else (i - 1) for n, i in enumerate(self.POSE)]        
+        self.LPOSE = [(i + 1) if (n % 2 == 0) else (i - 1) for n, i in enumerate(self.POSE)]
+        
+    @tf.function
+    def _get_r_frames(self, hand_fs, n_frames):
+        c_probs = tf.fill((n_frames,), 0.1)
+        c_probs = c_probs + 0.9*tf.reduce_sum(tf.one_hot(tf.where(hand_fs)[:, 0], n_frames), axis=0)    
+        f_idxs = tf.zeros((n_frames,))
+        while tf.reduce_sum(f_idxs) != self._max_len:
+            f_idxs = f_idxs + tf.one_hot(tf.random.categorical(c_probs[None], 1)[0], n_frames)[0]
+            f_idxs = tf.clip_by_value(f_idxs, 0, 1)
+
+        return tf.cast(f_idxs, dtype=tf.bool)         
         
     @tf.function(
         input_signature=(tf.TensorSpec(shape=[None, ROWS_PER_FRAME, 3], dtype=tf.float32),),
@@ -1170,10 +815,12 @@ class PreprocessLayerV0(tf.keras.layers.Layer):
 
         if n_frames < self._max_len:
             add = self._max_len - n_frames
-            # add_b = tf.random.uniform((), 0, add, dtype=tf.int32)
-            # add_b = tf.cast(tf.floor(tf.random.uniform((), 0, add)), tf.int32)
-            # add_b = tf.cast(tf.floor(add / 2), tf.int32)
-            add_b = add // 2
+            h_add = add // 2
+            if self._r_long:
+                add_b = tf.cast(tf.random.categorical(tf.ones((16,))[None], 1)[0], tf.int32)[0] + h_add - 8
+                add_b = tf.clip_by_value(add_b, 1, add-1)            
+            else:
+                add_b = h_add
             add_a = add - add_b
             frames = tf.concat([
                 tf.fill((add_b, sh[1], sh[2]), math.nan),
@@ -1181,10 +828,12 @@ class PreprocessLayerV0(tf.keras.layers.Layer):
                 tf.fill((add_a, sh[1], sh[2]), math.nan),    
             ], axis=0)    
         elif n_frames > self._max_len:
-            f_idxs = tf.cast(tf.math.round(tf.cast(n_frames, dtype=tf.float32) * (tf.range(0, self._max_len, dtype=tf.float32) / self._max_len)), tf.int32)
-            # f_idxs = tf.sort(tf.random.shuffle(tf.range(0, n_frames, 1))[:self._max_len])
-            # f_idxs = tf.range(0, n_frames, 1)[:self._max_len]
-            frames = tf.gather(frames, f_idxs, axis=0)
+            if self._r_long:
+                f_idxs = self._get_r_frames(hand_fs, n_frames)
+                frames = frames[f_idxs]              
+            else:
+                f_idxs = tf.cast(tf.math.round(tf.cast(n_frames, dtype=tf.float32) * (tf.range(0, self._max_len, dtype=tf.float32) / self._max_len)), tf.int32)
+                frames = tf.gather(frames, f_idxs, axis=0)
 
         out_frames = frames
         
@@ -1193,10 +842,12 @@ class PreprocessLayerV0(tf.keras.layers.Layer):
         return out_frames[..., :2]
 
 
+
 class PreprocessLayerV0Pose(tf.keras.layers.Layer):
-    def __init__(self, max_len):
+    def __init__(self, max_len, r_long):
         super(PreprocessLayerV0Pose, self).__init__()
         self._max_len = max_len
+        self._r_long = r_long
         
         self.REF = [500, 501, 512, 513, 159,  386, 13,]
 
@@ -1211,7 +862,18 @@ class PreprocessLayerV0Pose(tf.keras.layers.Layer):
         self.LHAND = np.arange(468, 489).tolist()
         self.RHAND = np.arange(522, 543).tolist()
         self.POSE = np.arange(500, 512).tolist()
-        self.LPOSE = [(i + 1) if (n % 2 == 0) else (i - 1) for n, i in enumerate(self.POSE)]        
+        self.LPOSE = [(i + 1) if (n % 2 == 0) else (i - 1) for n, i in enumerate(self.POSE)]
+        
+    @tf.function
+    def _get_r_frames(self, hand_fs, n_frames):
+        c_probs = tf.fill((n_frames,), 0.1)
+        c_probs = c_probs + 0.9*tf.reduce_sum(tf.one_hot(tf.where(hand_fs)[:, 0], n_frames), axis=0)    
+        f_idxs = tf.zeros((n_frames,))
+        while tf.reduce_sum(f_idxs) != self._max_len:
+            f_idxs = f_idxs + tf.one_hot(tf.random.categorical(c_probs[None], 1)[0], n_frames)[0]
+            f_idxs = tf.clip_by_value(f_idxs, 0, 1)
+
+        return tf.cast(f_idxs, dtype=tf.bool)     
         
     @tf.function(
         input_signature=(tf.TensorSpec(shape=[None, ROWS_PER_FRAME, 3], dtype=tf.float32),),
@@ -1263,10 +925,12 @@ class PreprocessLayerV0Pose(tf.keras.layers.Layer):
 
         if n_frames < self._max_len:
             add = self._max_len - n_frames
-            # add_b = tf.random.uniform((), 0, add, dtype=tf.int32)
-            # add_b = tf.cast(tf.floor(tf.random.uniform((), 0, add)), tf.int32)
-            # add_b = tf.cast(tf.floor(add / 2), tf.int32)
-            add_b = add // 2
+            h_add = add // 2
+            if self._r_long:
+                add_b = tf.cast(tf.random.categorical(tf.ones((16,))[None], 1)[0], tf.int32)[0] + h_add - 8
+                add_b = tf.clip_by_value(add_b, 1, add-1)            
+            else:
+                add_b = h_add
             add_a = add - add_b
             frames = tf.concat([
                 tf.fill((add_b, sh[1], sh[2]), math.nan),
@@ -1274,10 +938,12 @@ class PreprocessLayerV0Pose(tf.keras.layers.Layer):
                 tf.fill((add_a, sh[1], sh[2]), math.nan),    
             ], axis=0)    
         elif n_frames > self._max_len:
-            f_idxs = tf.cast(tf.math.round(tf.cast(n_frames, dtype=tf.float32) * (tf.range(0, self._max_len, dtype=tf.float32) / self._max_len)), tf.int32)
-            # f_idxs = tf.sort(tf.random.shuffle(tf.range(0, n_frames, 1))[:self._max_len])
-            # f_idxs = tf.range(0, n_frames, 1)[:self._max_len]
-            frames = tf.gather(frames, f_idxs, axis=0)
+            if self._r_long:
+                f_idxs = self._get_r_frames(hand_fs, n_frames)
+                frames = frames[f_idxs]              
+            else:
+                f_idxs = tf.cast(tf.math.round(tf.cast(n_frames, dtype=tf.float32) * (tf.range(0, self._max_len, dtype=tf.float32) / self._max_len)), tf.int32)
+                frames = tf.gather(frames, f_idxs, axis=0)
 
         out_frames = frames
         
@@ -1287,9 +953,10 @@ class PreprocessLayerV0Pose(tf.keras.layers.Layer):
 
 
 class PreprocessLayerV0Eyes(tf.keras.layers.Layer):
-    def __init__(self, max_len):
+    def __init__(self, max_len, r_long):
         super(PreprocessLayerV0Eyes, self).__init__()
         self._max_len = max_len
+        self._r_long = r_long
         
         self.REF = [500, 501, 512, 513, 159,  386, 13,]
 
@@ -1309,6 +976,16 @@ class PreprocessLayerV0Eyes(tf.keras.layers.Layer):
         self.EYES = [263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390, 249, 33, 245, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7]
         self.LEYES = [33, 245, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7, 263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390, 249]        
         
+    @tf.function
+    def _get_r_frames(self, hand_fs, n_frames):
+        c_probs = tf.fill((n_frames,), 0.1)
+        c_probs = c_probs + 0.9*tf.reduce_sum(tf.one_hot(tf.where(hand_fs)[:, 0], n_frames), axis=0)    
+        f_idxs = tf.zeros((n_frames,))
+        while tf.reduce_sum(f_idxs) != self._max_len:
+            f_idxs = f_idxs + tf.one_hot(tf.random.categorical(c_probs[None], 1)[0], n_frames)[0]
+            f_idxs = tf.clip_by_value(f_idxs, 0, 1)
+
+        return tf.cast(f_idxs, dtype=tf.bool) 
         
     @tf.function(
         input_signature=(tf.TensorSpec(shape=[None, ROWS_PER_FRAME, 3], dtype=tf.float32),),
@@ -1360,10 +1037,12 @@ class PreprocessLayerV0Eyes(tf.keras.layers.Layer):
 
         if n_frames < self._max_len:
             add = self._max_len - n_frames
-            # add_b = tf.random.uniform((), 0, add, dtype=tf.int32)
-            # add_b = tf.cast(tf.floor(tf.random.uniform((), 0, add)), tf.int32)
-            # add_b = tf.cast(tf.floor(add / 2), tf.int32)
-            add_b = add // 2
+            h_add = add // 2
+            if self._r_long:
+                add_b = tf.cast(tf.random.categorical(tf.ones((16,))[None], 1)[0], tf.int32)[0] + h_add - 8
+                add_b = tf.clip_by_value(add_b, 1, add-1)            
+            else:
+                add_b = h_add
             add_a = add - add_b
             frames = tf.concat([
                 tf.fill((add_b, sh[1], sh[2]), math.nan),
@@ -1371,10 +1050,12 @@ class PreprocessLayerV0Eyes(tf.keras.layers.Layer):
                 tf.fill((add_a, sh[1], sh[2]), math.nan),    
             ], axis=0)    
         elif n_frames > self._max_len:
-            f_idxs = tf.cast(tf.math.round(tf.cast(n_frames, dtype=tf.float32) * (tf.range(0, self._max_len, dtype=tf.float32) / self._max_len)), tf.int32)
-            # f_idxs = tf.sort(tf.random.shuffle(tf.range(0, n_frames, 1))[:self._max_len])
-            # f_idxs = tf.range(0, n_frames, 1)[:self._max_len]
-            frames = tf.gather(frames, f_idxs, axis=0)
+            if self._r_long:
+                f_idxs = self._get_r_frames(hand_fs, n_frames)
+                frames = frames[f_idxs]              
+            else:
+                f_idxs = tf.cast(tf.math.round(tf.cast(n_frames, dtype=tf.float32) * (tf.range(0, self._max_len, dtype=tf.float32) / self._max_len)), tf.int32)
+                frames = tf.gather(frames, f_idxs, axis=0)
 
         out_frames = frames
         
@@ -1384,9 +1065,10 @@ class PreprocessLayerV0Eyes(tf.keras.layers.Layer):
 
 
 class PreprocessLayerV0EyesSparce(tf.keras.layers.Layer):
-    def __init__(self, max_len):
+    def __init__(self, max_len, r_long):
         super(PreprocessLayerV0EyesSparce, self).__init__()
         self._max_len = max_len
+        self._r_long = r_long
         
         self.REF = [500, 501, 512, 513, 159,  386, 13,]
 
@@ -1405,7 +1087,17 @@ class PreprocessLayerV0EyesSparce(tf.keras.layers.Layer):
         
         self.EYES = [263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390, 249, 33, 245, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7]
         self.LEYES = [33, 245, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7, 263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390, 249]        
-        
+  
+    @tf.function
+    def _get_r_frames(self, hand_fs, n_frames):
+        c_probs = tf.fill((n_frames,), 0.1)
+        c_probs = c_probs + 0.9*tf.reduce_sum(tf.one_hot(tf.where(hand_fs)[:, 0], n_frames), axis=0)    
+        f_idxs = tf.zeros((n_frames,))
+        while tf.reduce_sum(f_idxs) != self._max_len:
+            f_idxs = f_idxs + tf.one_hot(tf.random.categorical(c_probs[None], 1)[0], n_frames)[0]
+            f_idxs = tf.clip_by_value(f_idxs, 0, 1)
+
+        return tf.cast(f_idxs, dtype=tf.bool) 
         
     @tf.function(
         input_signature=(tf.TensorSpec(shape=[None, ROWS_PER_FRAME, 3], dtype=tf.float32),),
@@ -1457,10 +1149,12 @@ class PreprocessLayerV0EyesSparce(tf.keras.layers.Layer):
 
         if n_frames < self._max_len:
             add = self._max_len - n_frames
-            # add_b = tf.random.uniform((), 0, add, dtype=tf.int32)
-            # add_b = tf.cast(tf.floor(tf.random.uniform((), 0, add)), tf.int32)
-            # add_b = tf.cast(tf.floor(add / 2), tf.int32)
-            add_b = add // 2
+            h_add = add // 2
+            if self._r_long:
+                add_b = tf.cast(tf.random.categorical(tf.ones((16,))[None], 1)[0], tf.int32)[0] + h_add - 8
+                add_b = tf.clip_by_value(add_b, 1, add-1)            
+            else:
+                add_b = h_add
             add_a = add - add_b
             frames = tf.concat([
                 tf.fill((add_b, sh[1], sh[2]), math.nan),
@@ -1468,10 +1162,12 @@ class PreprocessLayerV0EyesSparce(tf.keras.layers.Layer):
                 tf.fill((add_a, sh[1], sh[2]), math.nan),    
             ], axis=0)    
         elif n_frames > self._max_len:
-            f_idxs = tf.cast(tf.math.round(tf.cast(n_frames, dtype=tf.float32) * (tf.range(0, self._max_len, dtype=tf.float32) / self._max_len)), tf.int32)
-            # f_idxs = tf.sort(tf.random.shuffle(tf.range(0, n_frames, 1))[:self._max_len])
-            # f_idxs = tf.range(0, n_frames, 1)[:self._max_len]
-            frames = tf.gather(frames, f_idxs, axis=0)
+            if self._r_long:
+                f_idxs = self._get_r_frames(hand_fs, n_frames)
+                frames = frames[f_idxs]              
+            else:
+                f_idxs = tf.cast(tf.math.round(tf.cast(n_frames, dtype=tf.float32) * (tf.range(0, self._max_len, dtype=tf.float32) / self._max_len)), tf.int32)
+                frames = tf.gather(frames, f_idxs, axis=0)
 
         out_frames = frames
         
@@ -1480,11 +1176,16 @@ class PreprocessLayerV0EyesSparce(tf.keras.layers.Layer):
         return out_frames[..., :2]
 
 
-my_preprocess_layer96 = PreprocessLayerV0(max_len=96)
-my_preprocess_layer32 = PreprocessLayerV0(max_len=32)
-my_preprocess_layer32pose = PreprocessLayerV0Pose(max_len=32)
-my_preprocess_layer32eyes = PreprocessLayerV0Eyes(max_len=32)
-my_preprocess_layer32eyes_s =PreprocessLayerV0EyesSparce(max_len=32)
+my_preprocess_layer96 = PreprocessLayerV0(max_len=96, r_long=False)
+my_preprocess_layer32 = PreprocessLayerV0(max_len=32, r_long=False)
+my_preprocess_layer32pose = PreprocessLayerV0Pose(max_len=32, r_long=False)
+my_preprocess_layer32eyes = PreprocessLayerV0Eyes(max_len=32, r_long=False)
+my_preprocess_layer96_r = PreprocessLayerV0(max_len=96, r_long=True)
+my_preprocess_layer32_r = PreprocessLayerV0(max_len=32, r_long=True)
+my_preprocess_layer32pose_r = PreprocessLayerV0Pose(max_len=32, r_long=True)
+my_preprocess_layer32eyes_r = PreprocessLayerV0Eyes(max_len=32, r_long=True)
+my_preprocess_layer32eyes_s = PreprocessLayerV0EyesSparce(max_len=32, r_long=False)
+my_preprocess_layer32eyes_s_r = PreprocessLayerV0EyesSparce(max_len=32, r_long=True)
 
 from tensorflow.keras.models import load_model
 from copy import deepcopy
@@ -1500,45 +1201,212 @@ my_preprocess_layer1 = deepcopy(my_preprocess_layer96)
 modelname = 'model0sm1_r1_midle_v4_maxlen32_all'
 my_model3 = load_model(f"{conv1_models_path}/{modelname}.hdf5")
 my_model3.load_weights(f"{conv1_models_path}/{modelname}/best_weights-768.hdf5")
-my_preprocess_layer3 = deepcopy(my_preprocess_layer32)
+my_preprocess_layer3 = [deepcopy(my_preprocess_layer32), deepcopy(my_preprocess_layer32_r)]
 
 modelname = 'model0sm3_r1_midle_v4_maxlen32_withpose_all'
 my_model4 = load_model(f"{conv1_models_path}/{modelname}.hdf5")
 my_model4.load_weights(f"{conv1_models_path}/{modelname}/best_weights-280.hdf5")
-my_preprocess_layer4 = deepcopy(my_preprocess_layer32pose)
+my_preprocess_layer4 = [deepcopy(my_preprocess_layer32pose), deepcopy(my_preprocess_layer32pose_r)]
 
 modelname = 'model0sm2_r1_midle_v4_maxlen32_test5_frank_v2_all'
 my_model5 = load_model(f"{conv1_models_path}/{modelname}.hdf5")
 my_model5.load_weights(f"{conv1_models_path}/{modelname}/best_weights-560.hdf5")
-my_preprocess_layer5 = deepcopy(my_preprocess_layer32)
-
+my_preprocess_layer5 = [deepcopy(my_preprocess_layer32), deepcopy(my_preprocess_layer32_r)]
 
 modelname = 'model0sm2_r1_midle_v4_maxlen32_test5_frank_v3_all'
 my_model6 = load_model(f"{conv1_models_path}/{modelname}.hdf5")
 my_model6.load_weights(f"{conv1_models_path}/{modelname}/best_weights-768.hdf5")
-my_preprocess_layer6 = deepcopy(my_preprocess_layer32eyes)
+my_preprocess_layer6 = [deepcopy(my_preprocess_layer32eyes), deepcopy(my_preprocess_layer32eyes_r)]
 
 modelname = 'model0sm2_r1_midle_v4_maxlen32_test5_frank_v2_mu0_all'
 my_model7 = load_model(f"{conv1_models_path}/{modelname}.hdf5")
 my_model7.load_weights(f"{conv1_models_path}/{modelname}/best_weights-980.hdf5")
-my_preprocess_layer7 = deepcopy(my_preprocess_layer32)
+my_preprocess_layer7 = [deepcopy(my_preprocess_layer32), deepcopy(my_preprocess_layer32_r)]
 
 modelname = 'model0sm2_r1_midle_v4_maxlen32_test5_frank_v4_pfaug_all'
 my_model8 = load_model(f"{conv1_models_path}/{modelname}.hdf5")
 my_model8.load_weights(f"{conv1_models_path}/{modelname}/best_weights-908.hdf5")
-my_preprocess_layer8 = deepcopy(my_preprocess_layer32eyes_s)
+my_preprocess_layer8 = [deepcopy(my_preprocess_layer32eyes_s), deepcopy(my_preprocess_layer32eyes_s_r)]
 
 modelname = 'model0sm2_r1_midle_v4_maxlen32_test5_frank_v2_smv1_all'
 my_model5_sm = load_model(f"{conv1_models_path}/{modelname}.hdf5")
 my_model5_sm.load_weights(f"{conv1_models_path}/{modelname}/best_weights-908.hdf5")
-my_preprocess_layer5_sm = deepcopy(my_preprocess_layer32)
 
 modelname = 'model0sm2_r1_midle_v4_maxlen32_test5_frank_v3_smv1_all'
 my_model6_sm = load_model(f"{conv1_models_path}/{modelname}.hdf5")
 my_model6_sm.load_weights(f"{conv1_models_path}/{modelname}/best_weights-768.hdf5")
-my_preprocess_layer6_sm = deepcopy(my_preprocess_layer32eyes)
 
 modelname = 'model0sm2_r1_midle_v4_maxlen32_test5_frank_v2_mu0_smv1_all'
 my_model7_sm = load_model(f"{conv1_models_path}/{modelname}.hdf5")
 my_model7_sm.load_weights(f"{conv1_models_path}/{modelname}/best_weights-980.hdf5")
-my_preprocess_layer7_sm = deepcopy(my_preprocess_layer32)
+
+
+modelname = 'model0sm2_r1_midle_v4_maxlen32_test5_frank_v2_smv1_all'
+my_model5_sm = load_model(f"{conv1_models_path}/{modelname}.hdf5")
+my_model5_sm.load_weights(f"{conv1_models_path}/{modelname}/best_weights-908.hdf5")
+
+modelname = 'model0sm2_r1_midle_v4_maxlen32_test5_frank_v3_smv1_all'
+my_model6_sm = load_model(f"{conv1_models_path}/{modelname}.hdf5")
+my_model6_sm.load_weights(f"{conv1_models_path}/{modelname}/best_weights-768.hdf5")
+
+modelname = 'model0sm2_r1_midle_v4_maxlen32_test5_frank_v2_mu0_smv1_all'
+my_model7_sm = load_model(f"{conv1_models_path}/{modelname}.hdf5")
+my_model7_sm.load_weights(f"{conv1_models_path}/{modelname}/best_weights-980.hdf5")
+
+
+
+# TFLite model for submission
+class TFLiteModel(tf.Module):
+    def __init__(self, 
+        models,
+        preprocess_layer1, model1,         
+        preprocess_layer3, model3,
+        preprocess_layer4, model4,
+        preprocess_layer5, model5,
+        # 24.04         
+        preprocess_layer6, model6,
+        preprocess_layer7, model7,
+        preprocess_layer8, model8,         
+        ):
+        super(TFLiteModel, self).__init__()
+
+        # Load the feature generation and main models
+        self.preprocess_layer = preprocess_layer
+        self.model_nfold = models
+
+        self.preprocess_layer1 = preprocess_layer1
+        self.model1 = model1        
+        self.preprocess_layer3 = preprocess_layer3
+        self.model3 = model3
+        self.preprocess_layer4 = preprocess_layer4
+        self.model4 = model4
+        self.preprocess_layer5 = preprocess_layer5
+        self.model5 = model5  
+        
+        self.preprocess_layer6 = preprocess_layer6
+        self.model6 = model6
+
+        self.preprocess_layer7 = preprocess_layer7
+        self.model7 = model7
+        '''        
+        self.preprocess_layer8 = preprocess_layer8
+        self.model8 = model8 
+        '''
+    
+    @tf.function(input_signature=[tf.TensorSpec(shape=[None, N_ROWS, N_DIMS], dtype=tf.float32, name='inputs')])
+    def __call__(self, inputs):
+
+        # Preprocess Data
+        x, non_empty_frame_idxs = self.preprocess_layer(inputs)
+        # Add Batch Dimension
+        x = tf.expand_dims(x, axis=0)
+        non_empty_frame_idxs = tf.expand_dims(non_empty_frame_idxs, axis=0)
+        # Make Prediction
+        outputs=[]
+        for model in self.model_nfold:
+            outputs.append(model({'frames': x, 'non_empty_frame_idxs': non_empty_frame_idxs })[0, :])
+        outputs_tr = tf.keras.layers.Average()(outputs)
+        # Squeeze Output 1x250 -> 250
+        
+        x = self.preprocess_layer1(tf.cast(inputs, dtype=tf.float32))
+        outputs_1 = self.model1(x[None])[0, :]      
+        
+        x = self.preprocess_layer3[0](tf.cast(inputs, dtype=tf.float32))
+        outputs_3 = self.model3(x[None])[0, :]
+        #x1 = self.preprocess_layer3[1](tf.cast(inputs, dtype=tf.float32))
+        #outputs_3 = 0.5*outputs_3 + 0.5*self.model3(x1[None])[0, :]              
+        
+        x = self.preprocess_layer4[0](tf.cast(inputs, dtype=tf.float32))
+        outputs_4 = self.model4(x[None])[0, :]  
+        #x1 = self.preprocess_layer4[1](tf.cast(inputs, dtype=tf.float32))
+        #outputs_4 = 0.5*outputs_4 + 0.5*self.model4(x1[None])[0, :]         
+        
+        x = self.preprocess_layer5[0](tf.cast(inputs, dtype=tf.float32))
+        outputs_5 = self.model5(x[None])[0, :] 
+        x1 = self.preprocess_layer5[1](tf.cast(inputs, dtype=tf.float32))
+        outputs_5 = 0.5*outputs_5 + 0.5*self.model5(x1[None])[0, :]  
+        
+        x = self.preprocess_layer6[0](tf.cast(inputs, dtype=tf.float32))
+        outputs_6 = self.model6(x[None])[0, :]   
+        x1 = self.preprocess_layer6[1](tf.cast(inputs, dtype=tf.float32))
+        outputs_6 = 0.5*outputs_6 + 0.5*self.model6(x1[None])[0, :] 
+        
+        x = self.preprocess_layer7[0](tf.cast(inputs, dtype=tf.float32))
+        outputs_7 = self.model7(x[None])[0, :] 
+        x1 = self.preprocess_layer7[1](tf.cast(inputs, dtype=tf.float32))
+        outputs_7 = 0.5*outputs_7 + 0.5*self.model7(x1[None])[0, :] 
+        '''
+        x = self.preprocess_layer8(tf.cast(inputs, dtype=tf.float32))
+        outputs_8 = self.model8(x[None])[0, :]      
+        '''
+        
+        outputs = 0.2*outputs_1 + 0.2*outputs_3 + 0.3*outputs_4 + 0.3*outputs_5 + 0.3*outputs_6 + 0.3*outputs_7 + 1.5*outputs_tr
+
+        # Return a dictionary with the output tensor
+        return {'outputs': outputs}
+
+
+
+# Define TF Lite Model
+tflite_keras_model = TFLiteModel(
+    models,
+    my_preprocess_layer1, my_model1,   
+    my_preprocess_layer3, my_model3,
+    my_preprocess_layer4, my_model4,
+    my_preprocess_layer5, my_model5_sm, # Smaller varians of some models
+    
+    my_preprocess_layer6, my_model6_sm,
+    my_preprocess_layer7, my_model7_sm,
+    my_preprocess_layer8, my_model8,
+)
+
+
+
+# Sanity Check
+test_sample_id = 5
+for test_sample_id in range(10):
+    demo_raw_data = load_relevant_data_subset(train['file_path'].values[test_sample_id])
+#     print(f'demo_raw_data shape: {demo_raw_data.shape}, dtype: {demo_raw_data.dtype}')
+    demo_output = tflite_keras_model(demo_raw_data)["outputs"]
+#     print(f'demo_output shape: {demo_output.shape}, dtype: {demo_output.dtype}')
+    demo_prediction = demo_output.numpy().argmax()
+    print(f'demo_prediction: {demo_prediction}, correct: {train.iloc[test_sample_id]["sign_ord"]}')
+
+# Create Model Converter
+keras_model_converter = tf.lite.TFLiteConverter.from_keras_model(tflite_keras_model)
+keras_model_converter.optimizations = [tf.lite.Optimize.DEFAULT]
+keras_model_converter.target_spec.supported_types = [tf.float16]
+# Convert Model
+tflite_model = keras_model_converter.convert()
+# Write Model
+with open('/kaggle/working/model.tflite', 'wb') as f:
+    f.write(tflite_model)
+    
+# Zip Model
+#!zip submission.zip /kaggle/working/model.tflite
+
+
+# Verify TFLite model can be loaded and used for prediction
+#!pip install tflite-runtime
+#import tflite_runtime.interpreter as tflite
+
+#interpreter = tflite.Interpreter("/kaggle/working/model.tflite")
+#found_signatures = list(interpreter.get_signature_list().keys())
+#prediction_fn = interpreter.get_signature_runner("serving_default")
+
+#output = prediction_fn(inputs=demo_raw_data)
+#sign = output['outputs'].argmax()
+
+#print("PRED : ", ORD2SIGN.get(sign), f'[{sign}]')
+#print("TRUE : ", train.sign.values[0], f'[{train.sign_ord.values[0]}]')
+
+
+#train = pd.read_csv('/kaggle/input/asl-signs/train.csv')
+
+#test_df = train.iloc[:40000]
+
+
+#for row in tqdm(test_df.itertuples(), total=len(test_df)):
+#    frames = load_relevant_data_subset(os.path.join("/kaggle/input/asl-signs/", row.path))
+#    output = prediction_fn(inputs=frames)
+#    sign = np.argmax(output["outputs"])

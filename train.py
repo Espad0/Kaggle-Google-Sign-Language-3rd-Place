@@ -379,6 +379,8 @@ if PREPROCESS_DATA:
     ROOT_DIR = '.'
 else:
     ROOT_DIR = '/kaggle/input/gislr-dataset-public'
+
+# TODO: Check the ROOT_DIR
     
 # Load Data
 if USE_VAL:

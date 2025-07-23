@@ -16,6 +16,7 @@ import gc
 import sys
 import sklearn
 import scipy
+import time
 
 print(f'Tensorflow V{tf.__version__}')
 print(f'Python V{sys.version}')
@@ -30,7 +31,7 @@ mpl.rcParams['axes.titlesize'] = 24
 
 # If True, processing data from scratch
 # If False, loads preprocessed data
-PREPROCESS_DATA = True
+PREPROCESS_DATA = False
 TRAIN_MODEL = True
 # True: use 10% of participants as validation set
 # False: use all data for training -> gives better LB result
@@ -376,11 +377,8 @@ def preprocess_data():
 # Preprocess All Data From Scratch
 if PREPROCESS_DATA:
     preprocess_data()
-    ROOT_DIR = '.'
-else:
-    ROOT_DIR = '/kaggle/input/gislr-dataset-public'
 
-# TODO: Check the ROOT_DIR
+ROOT_DIR = '.'
     
 # Load Data
 if USE_VAL:
@@ -624,3 +622,419 @@ INIT_ZEROS = tf.keras.initializers.constant(0.0)
 GELU = tf.keras.activations.gelu
 
 print(f'UNITS: {UNITS}')
+
+
+# based on: https://stackoverflow.com/questions/67342988/verifying-the-implementation-of-multihead-attention-in-transformer
+# replaced softmax with softmax layer to support masked softmax
+def scaled_dot_product(q,k,v, softmax, attention_mask):
+    #calculates Q . K(transpose)
+    qkt = tf.matmul(q,k,transpose_b=True)
+    #caculates scaling factor
+    dk = tf.math.sqrt(tf.cast(q.shape[-1],dtype=tf.float32))
+    scaled_qkt = qkt/dk
+    softmax = softmax(scaled_qkt, mask=attention_mask)
+    
+    z = tf.matmul(softmax,v)
+    #shape: (m,Tx,depth), same shape as q,k,v
+    return z
+
+class MultiHeadAttention(tf.keras.layers.Layer):
+    def __init__(self,d_model,num_of_heads):
+        super(MultiHeadAttention,self).__init__()
+        self.d_model = d_model
+        self.num_of_heads = num_of_heads
+        self.depth = d_model//num_of_heads
+        self.wq = [tf.keras.layers.Dense(self.depth) for i in range(num_of_heads)]
+        self.wk = [tf.keras.layers.Dense(self.depth) for i in range(num_of_heads)]
+        self.wv = [tf.keras.layers.Dense(self.depth) for i in range(num_of_heads)]
+        self.wo = tf.keras.layers.Dense(d_model)
+        self.softmax = tf.keras.layers.Softmax()
+        
+    def call(self,x, attention_mask):
+        
+        multi_attn = []
+        for i in range(self.num_of_heads):
+            Q = self.wq[i](x)
+            K = self.wk[i](x)
+            V = self.wv[i](x)
+            multi_attn.append(scaled_dot_product(Q,K,V, self.softmax, attention_mask))
+            
+        multi_head = tf.concat(multi_attn,axis=-1)
+        multi_head_attention = self.wo(multi_head)
+        return multi_head_attention
+
+
+# Full Transformer
+class Transformer(tf.keras.Model):
+    def __init__(self, num_blocks):
+        super(Transformer, self).__init__(name='transformer')
+        self.num_blocks = num_blocks
+    
+    def build(self, input_shape):
+        self.ln_1s = []
+        self.mhas = []
+        self.ln_2s = []
+        self.mlps = []
+        # Make Transformer Blocks
+        for i in range(self.num_blocks):
+            # Multi Head Attention
+            self.mhas.append(MultiHeadAttention(UNITS, 8))
+            # Multi Layer Perception
+            self.mlps.append(tf.keras.Sequential([
+                tf.keras.layers.Dense(UNITS * MLP_RATIO, activation=GELU, kernel_initializer=INIT_GLOROT_UNIFORM),
+                tf.keras.layers.Dropout(MLP_DROPOUT_RATIO),
+                tf.keras.layers.Dense(UNITS, kernel_initializer=INIT_HE_UNIFORM),
+            ]))
+        
+    def call(self, x, attention_mask):
+        # Iterate input over transformer blocks
+        for mha, mlp in zip(self.mhas, self.mlps):
+            x = x + mha(x, attention_mask)
+            x = x + mlp(x)
+    
+        return x
+
+
+class LandmarkEmbedding(tf.keras.Model):
+    def __init__(self, units, name):
+        super(LandmarkEmbedding, self).__init__(name=f'{name}_embedding')
+        self.units = units
+        
+    def build(self, input_shape):
+        # Embedding for missing landmark in frame, initizlied with zeros
+        self.empty_embedding = self.add_weight(
+            name=f'{self.name}_empty_embedding',
+            shape=[self.units],
+            initializer=INIT_ZEROS,
+        )
+        # Embedding
+        self.dense = tf.keras.Sequential([
+            tf.keras.layers.Dense(self.units, name=f'{self.name}_dense_1', use_bias=False, kernel_initializer=INIT_GLOROT_UNIFORM),
+            tf.keras.layers.Activation(GELU),
+            tf.keras.layers.Dense(self.units, name=f'{self.name}_dense_2', use_bias=False, kernel_initializer=INIT_HE_UNIFORM),
+        ], name=f'{self.name}_dense')
+
+    def call(self, x):
+        return tf.where(
+                # Checks whether landmark is missing in frame
+                tf.reduce_sum(x, axis=2, keepdims=True) == 0,
+                # If so, the empty embedding is used
+                self.empty_embedding,
+                # Otherwise the landmark data is embedded
+                self.dense(x),
+            )
+
+
+class Embedding(tf.keras.Model):
+    def __init__(self):
+        super(Embedding, self).__init__()
+        
+    def get_diffs(self, l):
+        S = l.shape[2]
+        other = tf.expand_dims(l, 3)
+        other = tf.repeat(other, S, axis=3)
+        other = tf.transpose(other, [0,1,3,2])
+        diffs = tf.expand_dims(l, 3) - other
+        diffs = tf.reshape(diffs, [-1, INPUT_SIZE, S*S])
+        return diffs
+
+    def build(self, input_shape):
+        # Positional Embedding, initialized with zeros
+        self.positional_embedding = tf.keras.layers.Embedding(INPUT_SIZE+1, UNITS, embeddings_initializer=INIT_ZEROS)
+        # Embedding layer for Landmarks
+        self.lips_embedding = LandmarkEmbedding(LIPS_UNITS, 'lips')
+        self.left_hand_embedding = LandmarkEmbedding(HANDS_UNITS, 'left_hand')
+        self.pose_embedding = LandmarkEmbedding(POSE_UNITS, 'pose')
+        # Landmark Weights
+        self.landmark_weights = tf.Variable(tf.zeros([3], dtype=tf.float32), name='landmark_weights')
+        # Fully Connected Layers for combined landmarks
+        self.fc = tf.keras.Sequential([
+            tf.keras.layers.Dense(UNITS, name='fully_connected_1', use_bias=False, kernel_initializer=INIT_GLOROT_UNIFORM),
+            tf.keras.layers.Activation(GELU),
+            tf.keras.layers.Dense(UNITS, name='fully_connected_2', use_bias=False, kernel_initializer=INIT_HE_UNIFORM),
+        ], name='fc')
+
+
+    def call(self, lips0, left_hand0, pose0, non_empty_frame_idxs, training=False):
+        # Lips
+        lips_embedding = self.lips_embedding(lips0)
+        # Left Hand
+        left_hand_embedding = self.left_hand_embedding(left_hand0)
+        # Pose
+        pose_embedding = self.pose_embedding(pose0)
+        # Merge Embeddings of all landmarks with mean pooling
+        x = tf.stack((
+            lips_embedding, left_hand_embedding, pose_embedding,
+        ), axis=3)
+        x = x * tf.nn.softmax(self.landmark_weights)
+        x = tf.reduce_sum(x, axis=3)
+        # Fully Connected Layers
+        x = self.fc(x)
+        # Add Positional Embedding
+        max_frame_idxs = tf.clip_by_value(
+                tf.reduce_max(non_empty_frame_idxs, axis=1, keepdims=True),
+                1,
+                np.PINF,
+            )
+        normalised_non_empty_frame_idxs = tf.where(
+            tf.math.equal(non_empty_frame_idxs, -1.0),
+            INPUT_SIZE,
+            tf.cast(
+                non_empty_frame_idxs / max_frame_idxs * INPUT_SIZE,
+                tf.int32,
+            ),
+        )
+        x = x + self.positional_embedding(normalised_non_empty_frame_idxs)
+        
+        return x
+
+
+# Not used, adds random X/y translation to input on samples level
+class Augmentation(tf.keras.layers.Layer):
+    def __init__(self, noise_std):
+        super(Augmentation, self).__init__()
+        self.noise_std = noise_std
+    
+    def add_noise(self, t):
+        B = tf.shape(t)[0]
+        return tf.where(
+            t == 0.0,
+            0.0,
+            t + tf.random.normal([B,1,1,tf.shape(t)[3]], 0, self.noise_std),
+        )
+    
+    def call(self, lips0, left_hand0, pose0, training=False):
+        if training:
+            # Lips
+            lips0 = self.add_noise(lips0)
+            # Left Hand
+            left_hand0 = self.add_noise(left_hand0)
+            # Pose
+            pose0 = self.add_noise(pose0)
+        
+        return lips0, left_hand0, pose0
+
+
+# source:: https://stackoverflow.com/questions/60689185/label-smoothing-for-sparse-categorical-crossentropy
+def scce_with_ls(y_true, y_pred):
+    # One Hot Encode Sparsely Encoded Target Sign
+    y_true = tf.cast(y_true, tf.int32)
+    y_true = tf.one_hot(y_true, NUM_CLASSES, axis=1)
+    y_true = tf.squeeze(y_true, axis=2)
+    # Categorical Crossentropy with native label smoothing support
+    return tf.keras.losses.categorical_crossentropy(y_true, y_pred, label_smoothing=0.25)
+
+
+
+def get_model():
+    # Inputs
+    frames = tf.keras.layers.Input([INPUT_SIZE, N_COLS, N_DIMS], dtype=tf.float32, name='frames')
+    non_empty_frame_idxs = tf.keras.layers.Input([INPUT_SIZE], dtype=tf.float32, name='non_empty_frame_idxs')
+    # Padding Mask
+    mask0 = tf.cast(tf.math.not_equal(non_empty_frame_idxs, -1), tf.float32)
+    mask0 = tf.expand_dims(mask0, axis=2)
+    # Random Frame Masking
+    mask = tf.where(
+        (tf.random.uniform(tf.shape(mask0)) > 0.25) & tf.math.not_equal(mask0, 0.0),
+        1.0,
+        0.0,
+    )
+    # Correct Samples Which are all masked now...
+    mask = tf.where(
+        tf.math.equal(tf.reduce_sum(mask, axis=[1,2], keepdims=True), 0.0),
+        mask0,
+        mask,
+    )
+    
+    
+    """
+        left_hand: 468:489
+        pose: 489:522
+        right_hand: 522:543
+    """
+    x = frames
+    x = tf.slice(x, [0,0,0,0], [-1,INPUT_SIZE, N_COLS, 2])
+    # LIPS
+    lips = tf.slice(x, [0,0,LIPS_START,0], [-1,INPUT_SIZE, 40, 2])
+    lips = tf.where(
+            tf.math.equal(lips, 0.0),
+            0.0,
+            (lips - LIPS_MEAN) / LIPS_STD,
+        )
+    # LEFT HAND
+    left_hand = tf.slice(x, [0,0,40,0], [-1,INPUT_SIZE, 21, 2])
+    left_hand = tf.where(
+            tf.math.equal(left_hand, 0.0),
+            0.0,
+            (left_hand - LEFT_HANDS_MEAN) / LEFT_HANDS_STD,
+        )
+    # POSE
+    pose = tf.slice(x, [0,0,61,0], [-1,INPUT_SIZE, 5, 2])
+    pose = tf.where(
+            tf.math.equal(pose, 0.0),
+            0.0,
+            (pose - POSE_MEAN) / POSE_STD,
+        )
+    
+    # Flatten
+    lips = tf.reshape(lips, [-1, INPUT_SIZE, 40*2])
+    left_hand = tf.reshape(left_hand, [-1, INPUT_SIZE, 21*2])
+    pose = tf.reshape(pose, [-1, INPUT_SIZE, 5*2])
+        
+    # Embedding
+    x = Embedding()(lips, left_hand, pose, non_empty_frame_idxs)
+    
+    # Encoder Transformer Blocks
+    x = Transformer(NUM_BLOCKS)(x, mask)
+    
+    # Pooling
+    x = tf.reduce_sum(x * mask, axis=1) / tf.reduce_sum(mask, axis=1)
+    # Classifier Dropout
+    x = tf.keras.layers.Dropout(CLASSIFIER_DROPOUT_RATIO)(x)
+    # Classification Layer
+    x = tf.keras.layers.Dense(NUM_CLASSES, activation=tf.keras.activations.softmax, kernel_initializer=INIT_GLOROT_UNIFORM)(x)
+    
+    outputs = x
+    
+    # Create Tensorflow Model
+    model = tf.keras.models.Model(inputs=[frames, non_empty_frame_idxs], outputs=outputs)
+    
+    # Sparse Categorical Cross Entropy With Label Smoothing
+    loss = scce_with_ls
+    
+    # Adam Optimizer with weight decay
+    optimizer = tf.keras.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-5, clipnorm=1.0)
+    
+    # TopK Metrics
+    metrics = [
+        tf.keras.metrics.SparseCategoricalAccuracy(name='acc'),
+        tf.keras.metrics.SparseTopKCategoricalAccuracy(k=5, name='top_5_acc'),
+        tf.keras.metrics.SparseTopKCategoricalAccuracy(k=10, name='top_10_acc'),
+    ]
+    
+    model.compile(loss=loss, optimizer=optimizer, metrics=metrics)
+    
+    return model
+
+
+tf.keras.backend.clear_session()
+
+model = get_model()
+
+
+# Plot model summary
+model.summary(expand_nested=True)
+
+
+# tf.keras.utils.plot_model(model, show_shapes=True, show_dtype=True, show_layer_names=True, expand_nested=True, show_layer_activations=True)
+# Note: Requires graphviz to be installed (sudo apt-get install graphviz)
+
+
+if not PREPROCESS_DATA and TRAIN_MODEL:
+    y_pred = model.predict_on_batch(X_batch).flatten()
+
+    print(f'# NaN Values In Prediction: {np.isnan(y_pred).sum()}')
+
+
+if not PREPROCESS_DATA and TRAIN_MODEL:
+    plt.figure(figsize=(12,5))
+    plt.title(f'Softmax Output Initialized Model | µ={y_pred.mean():.3f}, σ={y_pred.std():.3f}', pad=25)
+    pd.Series(y_pred).plot(kind='hist', bins=128, label='Class Probability')
+    plt.xlim(0, max(y_pred) * 1.1)
+    plt.vlines([1 / NUM_CLASSES], 0, plt.ylim()[1], color='red', label=f'Random Guessing Baseline 1/NUM_CLASSES={1 / NUM_CLASSES:.3f}')
+    plt.grid()
+    plt.legend()
+    plt.show()
+
+
+def lrfn(current_step, num_warmup_steps, lr_max, num_cycles=0.50, num_training_steps=N_EPOCHS):
+    
+    if current_step < num_warmup_steps:
+        if WARMUP_METHOD == 'log':
+            return lr_max * 0.10 ** (num_warmup_steps - current_step)
+        else:
+            return lr_max * 2 ** -(num_warmup_steps - current_step)
+    else:
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress))) * lr_max
+
+
+def plot_lr_schedule(lr_schedule, epochs):
+    fig = plt.figure(figsize=(20, 10))
+    plt.plot([None] + lr_schedule + [None])
+    # X Labels
+    x = np.arange(1, epochs + 1)
+    x_axis_labels = [i if epochs <= 40 or i % 5 == 0 or i == 1 else None for i in range(1, epochs + 1)]
+    plt.xlim([1, epochs])
+    plt.xticks(x, x_axis_labels) # set tick step to 1 and let x axis start at 1
+    
+    # Increase y-limit for better readability
+    plt.ylim([0, max(lr_schedule) * 1.1])
+    
+    # Title
+    schedule_info = f'start: {lr_schedule[0]:.1E}, max: {max(lr_schedule):.1E}, final: {lr_schedule[-1]:.1E}'
+    plt.title(f'Step Learning Rate Schedule, {schedule_info}', size=18, pad=12)
+    
+    # Plot Learning Rates
+    for x, val in enumerate(lr_schedule):
+        if epochs <= 40 or x % 5 == 0 or x is epochs - 1:
+            if x < len(lr_schedule) - 1:
+                if lr_schedule[x - 1] < val:
+                    ha = 'right'
+                else:
+                    ha = 'left'
+            elif x == 0:
+                ha = 'right'
+            else:
+                ha = 'left'
+            plt.plot(x + 1, val, 'o', color='black');
+            offset_y = (max(lr_schedule) - min(lr_schedule)) * 0.02
+            plt.annotate(f'{val:.1E}', xy=(x + 1, val + offset_y), size=12, ha=ha)
+    
+    plt.xlabel('Epoch', size=16, labelpad=5)
+    plt.ylabel('Learning Rate', size=16, labelpad=5)
+    plt.grid()
+    plt.show()
+
+# Learning rate for encoder
+LR_SCHEDULE = [lrfn(step, num_warmup_steps=N_WARMUP_EPOCHS, lr_max=LR_MAX, num_cycles=0.50) for step in range(N_EPOCHS)]
+# Plot Learning Rate Schedule
+plot_lr_schedule(LR_SCHEDULE, epochs=N_EPOCHS)
+# Learning Rate Callback
+lr_callback = tf.keras.callbacks.LearningRateScheduler(lambda step: LR_SCHEDULE[step], verbose=1)
+
+
+# Custom callback to update weight decay with learning rate
+class WeightDecayCallback(tf.keras.callbacks.Callback):
+    def __init__(self, wd_ratio=WD_RATIO):
+        self.step_counter = 0
+        self.wd_ratio = wd_ratio
+    
+    def on_epoch_begin(self, epoch, logs=None):
+        model.optimizer.weight_decay = model.optimizer.learning_rate * self.wd_ratio
+        print(f'learning rate: {model.optimizer.learning_rate.numpy():.2e}, weight decay: {model.optimizer.weight_decay.numpy():.2e}')
+
+
+
+
+if TRAIN_MODEL:
+    # Verify model prediction is <<<100ms
+    start_time = time.time()
+    for _ in range(100):
+        model.predict_on_batch({ 'frames': X_train[:1], 'non_empty_frame_idxs': NON_EMPTY_FRAME_IDXS_TRAIN[:1] })
+    end_time = time.time()
+    avg_time = (end_time - start_time) / 100
+    print(f'Average prediction time: {avg_time*1000:.2f}ms')
+
+
+if USE_VAL:
+    # Verify Validation Dataset Covers All Signs
+    print(f'# Unique Signs in Validation Set: {pd.Series(y_val).nunique()}')
+    # Value Counts
+    print(pd.Series(y_val).value_counts().to_frame('Count').iloc[[1,2,3,-3,-2,-1]])
+
+
+# Sanity Check
+if TRAIN_MODEL and USE_VAL:
+    _ = model.evaluate(*validation_data, verbose=2)

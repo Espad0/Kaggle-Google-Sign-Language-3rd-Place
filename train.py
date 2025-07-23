@@ -4,7 +4,8 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import seaborn as sn
-
+import zipfile
+import tflite_runtime.interpreter as tflite
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split, GroupShuffleSplit 
 
@@ -1038,3 +1039,215 @@ if USE_VAL:
 # Sanity Check
 if TRAIN_MODEL and USE_VAL:
     _ = model.evaluate(*validation_data, verbose=2)
+
+
+if TRAIN_MODEL:
+    # Clear all models in GPU
+    tf.keras.backend.clear_session()
+
+    # Get new fresh model
+    model = get_model()
+    
+    # Sanity Check
+    model.summary()
+
+    # Actual Training
+    history = model.fit(
+            x=get_train_batch_all_signs(X_train, y_train, NON_EMPTY_FRAME_IDXS_TRAIN),
+            steps_per_epoch=len(X_train) // (NUM_CLASSES * BATCH_ALL_SIGNS_N),
+            epochs=N_EPOCHS,
+            # Only used for validation data since training data is a generator
+            batch_size=BATCH_SIZE,
+            validation_data=validation_data,
+            callbacks=[
+                lr_callback,
+                WeightDecayCallback(),
+            ],
+            verbose = VERBOSE,
+        )
+
+
+# Save Model Weights
+model.save_weights('model.h5')
+
+
+if USE_VAL:
+    # Validation Predictions
+    y_val_pred = model.predict({ 'frames': X_val, 'non_empty_frame_idxs': NON_EMPTY_FRAME_IDXS_VAL }, verbose=2).argmax(axis=1)
+    # Label
+    labels = [ORD2SIGN.get(i).replace(' ', '_') for i in range(NUM_CLASSES)]
+
+
+# Landmark Weights
+for w in model.get_layer('embedding').weights:
+    if 'landmark_weights' in w.name:
+        weights = scipy.special.softmax(w)
+
+landmarks = ['lips_embedding', 'left_hand_embedding', 'pose_embedding']
+
+for w, lm in zip(weights, landmarks):
+    print(f'{lm} weight: {(w*100):.1f}%')
+
+
+def print_classification_report():
+    # Classification report for all signs
+    classification_report = sklearn.metrics.classification_report(
+            y_val,
+            y_val_pred,
+            target_names=labels,
+            output_dict=True,
+        )
+    # Round Data for better readability
+    classification_report = pd.DataFrame(classification_report).T
+    classification_report = classification_report.round(2)
+    classification_report = classification_report.astype({
+            'support': np.uint16,
+        })
+    # Add signs
+    classification_report['sign'] = [e if e in SIGN2ORD else -1 for e in classification_report.index]
+    classification_report['sign_ord'] = classification_report['sign'].apply(SIGN2ORD.get).fillna(-1).astype(np.int16)
+    # Sort on F1-score
+    classification_report = pd.concat((
+        classification_report.head(NUM_CLASSES).sort_values('f1-score', ascending=False),
+        classification_report.tail(3),
+    ))
+
+    pd.options.display.max_rows = 999
+    print(classification_report)
+
+if USE_VAL:
+    print_classification_report()
+
+
+def plot_history_metric(metric, f_best=np.argmax, ylim=None, yscale=None, yticks=None):
+    plt.figure(figsize=(20, 10))
+    
+    values = history.history[metric]
+    N_EPOCHS = len(values)
+    val = 'val' in ''.join(history.history.keys())
+    # Epoch Ticks
+    if N_EPOCHS <= 20:
+        x = np.arange(1, N_EPOCHS + 1)
+    else:
+        x = [1, 5] + [10 + 5 * idx for idx in range((N_EPOCHS - 10) // 5 + 1)]
+
+    x_ticks = np.arange(1, N_EPOCHS+1)
+
+    # Validation
+    if val:
+        val_values = history.history[f'val_{metric}']
+        val_argmin = f_best(val_values)
+        plt.plot(x_ticks, val_values, label=f'val')
+
+    # summarize history for accuracy
+    plt.plot(x_ticks, values, label=f'train')
+    argmin = f_best(values)
+    plt.scatter(argmin + 1, values[argmin], color='red', s=75, marker='o', label=f'train_best')
+    if val:
+        plt.scatter(val_argmin + 1, val_values[val_argmin], color='purple', s=75, marker='o', label=f'val_best')
+
+    plt.title(f'Model {metric}', fontsize=24, pad=10)
+    plt.ylabel(metric, fontsize=20, labelpad=10)
+
+    if ylim:
+        plt.ylim(ylim)
+
+    if yscale is not None:
+        plt.yscale(yscale)
+        
+    if yticks is not None:
+        plt.yticks(yticks, fontsize=16)
+
+    plt.xlabel('epoch', fontsize=20, labelpad=10)        
+    plt.tick_params(axis='x', labelsize=8)
+    plt.xticks(x, fontsize=16) # set tick step to 1 and let x axis start at 1
+    plt.yticks(fontsize=16)
+    
+    plt.legend(prop={'size': 10})
+    plt.grid()
+    plt.show()
+
+
+if TRAIN_MODEL:
+    plot_history_metric('loss', f_best=np.argmin)
+
+
+if TRAIN_MODEL:
+    plot_history_metric('acc', ylim=[0,1], yticks=np.arange(0.0, 1.1, 0.1))
+
+if TRAIN_MODEL:
+    plot_history_metric('top_5_acc', ylim=[0,1], yticks=np.arange(0.0, 1.1, 0.1))
+
+if TRAIN_MODEL:
+    plot_history_metric('top_10_acc', ylim=[0,1], yticks=np.arange(0.0, 1.1, 0.1))
+
+
+
+### SUBMISSION ###
+
+
+# TFLite model for submission
+class TFLiteModel(tf.Module):
+    def __init__(self, model):
+        super(TFLiteModel, self).__init__()
+
+        # Load the feature generation and main models
+        self.preprocess_layer = preprocess_layer
+        self.model = model
+    
+    @tf.function(input_signature=[tf.TensorSpec(shape=[None, N_ROWS, N_DIMS], dtype=tf.float32, name='inputs')])
+    def __call__(self, inputs):
+        # Preprocess Data
+        x, non_empty_frame_idxs = self.preprocess_layer(inputs)
+        # Add Batch Dimension
+        x = tf.expand_dims(x, axis=0)
+        non_empty_frame_idxs = tf.expand_dims(non_empty_frame_idxs, axis=0)
+        # Make Prediction
+        outputs = self.model({ 'frames': x, 'non_empty_frame_idxs': non_empty_frame_idxs })
+        # Squeeze Output 1x250 -> 250
+        outputs = tf.squeeze(outputs, axis=0)
+
+        # Return a dictionary with the output tensor
+        return {'outputs': outputs}
+
+# Define TF Lite Model
+tflite_keras_model = TFLiteModel(model)
+
+# Sanity Check
+demo_raw_data = load_relevant_data_subset(train['file_path'].values[5])
+print(f'demo_raw_data shape: {demo_raw_data.shape}, dtype: {demo_raw_data.dtype}')
+demo_output = tflite_keras_model(demo_raw_data)["outputs"]
+print(f'demo_output shape: {demo_output.shape}, dtype: {demo_output.dtype}')
+demo_prediction = demo_output.numpy().argmax()
+print(f'demo_prediction: {demo_prediction}, correct: {train.iloc[0]["sign_ord"]}')
+
+
+# Create Model Converter
+keras_model_converter = tf.lite.TFLiteConverter.from_keras_model(tflite_keras_model)
+# Convert Model
+tflite_model = keras_model_converter.convert()
+# Write Model
+with open('model.tflite', 'wb') as f:
+    f.write(tflite_model)
+    
+# Zip Model
+with zipfile.ZipFile('submission.zip', 'w') as zipf:
+    zipf.write('model.tflite', 'model.tflite')
+
+print("Model zipped successfully as submission.zip")
+
+
+
+# Verify TFLite model can be loaded and used for prediction
+# Note: tflite-runtime needs to be installed separately: pip install tflite-runtime
+
+
+interpreter = tflite.Interpreter("model.tflite")
+found_signatures = list(interpreter.get_signature_list().keys())
+prediction_fn = interpreter.get_signature_runner("serving_default")
+
+output = prediction_fn(inputs=demo_raw_data)
+sign = output['outputs'].argmax()
+
+print("PRED : ", ORD2SIGN.get(sign), f'[{sign}]')
+print("TRUE : ", train.sign.values[0], f'[{train.sign_ord.values[0]}]')

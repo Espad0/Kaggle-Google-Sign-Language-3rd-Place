@@ -1,3 +1,6 @@
+import os
+# os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # Disable GPU
+
 import numpy as np
 import pandas as pd
 import tensorflow as tf
@@ -11,7 +14,6 @@ from sklearn.model_selection import train_test_split, GroupShuffleSplit
 
 import glob
 import sys
-import os
 import math
 import gc
 import sys
@@ -32,7 +34,7 @@ mpl.rcParams['axes.titlesize'] = 24
 
 # If True, processing data from scratch
 # If False, loads preprocessed data
-PREPROCESS_DATA = False
+PREPROCESS_DATA = False  # Set to True to re-preprocess with INPUT_SIZE=32
 TRAIN_MODEL = True
 # True: use 10% of participants as validation set
 # False: use all data for training -> gives better LB result
@@ -46,10 +48,10 @@ NUM_CLASSES = 250
 IS_INTERACTIVE = True
 VERBOSE = 1 if IS_INTERACTIVE else 2
 
-INPUT_SIZE = 64
+INPUT_SIZE = 32  # Reduced from 64 to save memory
 
-BATCH_ALL_SIGNS_N = 4
-BATCH_SIZE = 256
+BATCH_ALL_SIGNS_N = 2  # Reduced from 4
+BATCH_SIZE = 128  # Reduced from 256
 N_EPOCHS = 100
 LR_MAX = 1e-3
 N_WARMUP_EPOCHS = 0
@@ -305,7 +307,8 @@ class PreprocessLayer(tf.keras.layers.Layer):
             
             return data, non_empty_frames_idxs
     
-preprocess_layer = PreprocessLayer()
+# Delay preprocessing layer initialization until needed
+preprocess_layer = None
 
 
 """
@@ -316,6 +319,10 @@ preprocess_layer = PreprocessLayer()
         
 """
 def get_data(file_path):
+    global preprocess_layer
+    if preprocess_layer is None:
+        print("PREPARING PREPROCESS LAYER") 
+        preprocess_layer = PreprocessLayer()
     # Load Raw Data
     data = load_relevant_data_subset(file_path)
     # Process Data Using Tensorflow
@@ -1192,6 +1199,10 @@ class TFLiteModel(tf.Module):
         super(TFLiteModel, self).__init__()
 
         # Load the feature generation and main models
+        global preprocess_layer
+        if preprocess_layer is None:
+            print("PREPARING PREPROCESS LAYER FOR TFLITE MODEL") 
+            preprocess_layer = PreprocessLayer()
         self.preprocess_layer = preprocess_layer
         self.model = model
     

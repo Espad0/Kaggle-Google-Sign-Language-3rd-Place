@@ -52,3 +52,6 @@ venv.bak/
 ehthumbs.db
 Thumbs.db 
 *.npy
+*.zip
+*.tflite
+*.h5

@@ -58,6 +58,9 @@ N_WARMUP_EPOCHS = 0
 WD_RATIO = 0.05
 MASK_VAL = 4237
 
+# Visualization flag - set to True to show plots during training
+SHOW_PLOTS = False
+
 # Prints Shape and Dtype For List Of Variables
 def print_shape_dtype(l, names):
     for e, n in zip(l, names):
@@ -104,34 +107,37 @@ for idx, file_path in enumerate(tqdm(train['file_path'].sample(N, random_state=S
 # Number of unique frames in each video
 print(pd.Series(N_UNIQUE_FRAMES).describe(percentiles=PERCENTILES).to_frame('N_UNIQUE_FRAMES'))
 
-plt.figure(figsize=(15,8))
-plt.title('Number of Unique Frames', size=24)
-pd.Series(N_UNIQUE_FRAMES).plot(kind='hist', bins=128)
-plt.grid()
-xlim = math.ceil(plt.xlim()[1])
-plt.xlim(0, xlim)
-plt.xticks(np.arange(0, xlim+25, 25))
-plt.show()
+if SHOW_PLOTS:
+    plt.figure(figsize=(15,8))
+    plt.title('Number of Unique Frames', size=24)
+    pd.Series(N_UNIQUE_FRAMES).plot(kind='hist', bins=128)
+    plt.grid()
+    xlim = math.ceil(plt.xlim()[1])
+    plt.xlim(0, xlim)
+    plt.xticks(np.arange(0, xlim+25, 25))
+    plt.show()
 
 # Number of missing frames, consecutive frames with missing intermediate frame, i.e. 1,2,4,5 -> 3 is missing
 print(pd.Series(N_MISSING_FRAMES).describe(percentiles=PERCENTILES).to_frame('N_MISSING_FRAMES'))
 
-plt.figure(figsize=(15,8))
-plt.title('Number of Missing Frames', size=24)
-pd.Series(N_MISSING_FRAMES).plot(kind='hist', bins=128)
-plt.grid()
-plt.xlim(0, math.ceil(plt.xlim()[1]))
-plt.show()
+if SHOW_PLOTS:
+    plt.figure(figsize=(15,8))
+    plt.title('Number of Missing Frames', size=24)
+    pd.Series(N_MISSING_FRAMES).plot(kind='hist', bins=128)
+    plt.grid()
+    plt.xlim(0, math.ceil(plt.xlim()[1]))
+    plt.show()
 
 # Maximum frame number
 print(pd.Series(MAX_FRAME).describe(percentiles=PERCENTILES).to_frame('MAX_FRAME'))
 
-plt.figure(figsize=(15,8))
-plt.title('Maximum Frames Index', size=24)
-pd.Series(MAX_FRAME).plot(kind='hist', bins=128)
-plt.grid()
-plt.xlim(0, math.ceil(plt.xlim()[1]))
-plt.show()
+if SHOW_PLOTS:
+    plt.figure(figsize=(15,8))
+    plt.title('Maximum Frames Index', size=24)
+    pd.Series(MAX_FRAME).plot(kind='hist', bins=128)
+    plt.grid()
+    plt.xlim(0, math.ceil(plt.xlim()[1]))
+    plt.show()
 
 
 USE_TYPES = ['left_hand', 'pose', 'right_hand']
@@ -425,16 +431,17 @@ N_EMPTY_FRAMES_WATERFALL = []
 for n in tqdm(range(1,INPUT_SIZE+1)):
     N_EMPTY_FRAMES_WATERFALL.append(sum(N_EMPTY_FRAMES >= n) / len(NON_EMPTY_FRAME_IDXS_TRAIN) * 100)
 
-plt.figure(figsize=(18,10))
-plt.title('Waterfall Plot For Number Of Non Empty Frames')
-pd.Series(N_EMPTY_FRAMES_WATERFALL).plot(kind='bar')
-plt.grid(axis='y')
-plt.xticks(np.arange(INPUT_SIZE), np.arange(1, INPUT_SIZE+1))
-plt.xlabel('Number of Non Empty Frames', size=16)
-plt.yticks(np.arange(0, 100+10, 10))
-plt.ylim(0, 100)
-plt.ylabel('Percentage of Samples With At Least N Non Empty Frames', size=16)
-plt.show()
+if SHOW_PLOTS:
+    plt.figure(figsize=(18,10))
+    plt.title('Waterfall Plot For Number Of Non Empty Frames')
+    pd.Series(N_EMPTY_FRAMES_WATERFALL).plot(kind='bar')
+    plt.grid(axis='y')
+    plt.xticks(np.arange(INPUT_SIZE), np.arange(1, INPUT_SIZE+1))
+    plt.xlabel('Number of Non Empty Frames', size=16)
+    plt.yticks(np.arange(0, 100+10, 10))
+    plt.ylim(0, 100)
+    plt.ylabel('Percentage of Samples With At Least N Non Empty Frames', size=16)
+    plt.show()
 
 
 # Percentage of frames filled, this is the maximum fill percentage of each landmark
@@ -454,7 +461,10 @@ def get_lips_mean_std():
     LIPS_STD_X = np.zeros([LIPS_IDXS.size], dtype=np.float32)
     LIPS_STD_Y = np.zeros([LIPS_IDXS.size], dtype=np.float32)
 
-    fig, axes = plt.subplots(3, 1, figsize=(15, N_DIMS*6))
+    if SHOW_PLOTS:
+        fig, axes = plt.subplots(3, 1, figsize=(15, N_DIMS*6))
+    else:
+        fig, axes = None, [None] * 3
 
     for col, ll in enumerate(tqdm( np.transpose(X_train[:,:,LIPS_IDXS], [2,3,0,1]).reshape([LIPS_IDXS.size, N_DIMS, -1]) )):
         for dim, l in enumerate(ll):
@@ -466,15 +476,17 @@ def get_lips_mean_std():
                 LIPS_MEAN_Y[col] = v.mean()
                 LIPS_STD_Y[col] = v.std()
 
-            axes[dim].boxplot(v, notch=False, showfliers=False, positions=[col], whis=[5,95])
+            if SHOW_PLOTS:
+                axes[dim].boxplot(v, notch=False, showfliers=False, positions=[col], whis=[5,95])
 
-    for ax, dim_name in zip(axes, DIM_NAMES):
-        ax.set_title(f'Lips {dim_name.upper()} Dimension', size=24)
-        ax.tick_params(axis='x', labelsize=8)
-        ax.grid(axis='y')
+    if SHOW_PLOTS:
+        for ax, dim_name in zip(axes, DIM_NAMES):
+            ax.set_title(f'Lips {dim_name.upper()} Dimension', size=24)
+            ax.tick_params(axis='x', labelsize=8)
+            ax.grid(axis='y')
 
-    plt.subplots_adjust(hspace=0.50)
-    plt.show()
+        plt.subplots_adjust(hspace=0.50)
+        plt.show()
 
     LIPS_MEAN = np.array([LIPS_MEAN_X, LIPS_MEAN_Y]).T
     LIPS_STD = np.array([LIPS_STD_X, LIPS_STD_Y]).T
@@ -497,7 +509,10 @@ def get_left_right_hand_mean_std():
     LEFT_HANDS_STD_X = np.zeros([LEFT_HAND_IDXS.size], dtype=np.float32)
     LEFT_HANDS_STD_Y = np.zeros([LEFT_HAND_IDXS.size], dtype=np.float32)
 
-    fig, axes = plt.subplots(3, 1, figsize=(15, N_DIMS*6))
+    if SHOW_PLOTS:
+        fig, axes = plt.subplots(3, 1, figsize=(15, N_DIMS*6))
+    else:
+        fig, axes = None, [None] * 3
 
     for col, ll in enumerate(tqdm( np.transpose(X_train[:,:,LEFT_HAND_IDXS], [2,3,0,1]).reshape([LEFT_HAND_IDXS.size, N_DIMS, -1]) )):
         for dim, l in enumerate(ll):
@@ -509,15 +524,17 @@ def get_left_right_hand_mean_std():
                 LEFT_HANDS_MEAN_Y[col] = v.mean()
                 LEFT_HANDS_STD_Y[col] = v.std()
             # Plot
-            axes[dim].boxplot(v, notch=False, showfliers=False, positions=[col], whis=[5,95])
+            if SHOW_PLOTS:
+                axes[dim].boxplot(v, notch=False, showfliers=False, positions=[col], whis=[5,95])
 
-    for ax, dim_name in zip(axes, DIM_NAMES):
-        ax.set_title(f'Hands {dim_name.upper()} Dimension', size=24)
-        ax.tick_params(axis='x', labelsize=8)
-        ax.grid(axis='y')
+    if SHOW_PLOTS:
+        for ax, dim_name in zip(axes, DIM_NAMES):
+            ax.set_title(f'Hands {dim_name.upper()} Dimension', size=24)
+            ax.tick_params(axis='x', labelsize=8)
+            ax.grid(axis='y')
 
-    plt.subplots_adjust(hspace=0.50)
-    plt.show()
+        plt.subplots_adjust(hspace=0.50)
+        plt.show()
 
     LEFT_HANDS_MEAN = np.array([LEFT_HANDS_MEAN_X, LEFT_HANDS_MEAN_Y]).T
     LEFT_HANDS_STD = np.array([LEFT_HANDS_STD_X, LEFT_HANDS_STD_Y]).T
@@ -539,7 +556,10 @@ def get_pose_mean_std():
     POSE_STD_X = np.zeros([POSE_IDXS.size], dtype=np.float32)
     POSE_STD_Y = np.zeros([POSE_IDXS.size], dtype=np.float32)
 
-    fig, axes = plt.subplots(3, 1, figsize=(15, N_DIMS*6))
+    if SHOW_PLOTS:
+        fig, axes = plt.subplots(3, 1, figsize=(15, N_DIMS*6))
+    else:
+        fig, axes = None, [None] * 3
 
     for col, ll in enumerate(tqdm( np.transpose(X_train[:,:,POSE_IDXS], [2,3,0,1]).reshape([POSE_IDXS.size, N_DIMS, -1]) )):
         for dim, l in enumerate(ll):
@@ -551,15 +571,17 @@ def get_pose_mean_std():
                 POSE_MEAN_Y[col] = v.mean()
                 POSE_STD_Y[col] = v.std()
 
-            axes[dim].boxplot(v, notch=False, showfliers=False, positions=[col], whis=[5,95])
+            if SHOW_PLOTS:
+                axes[dim].boxplot(v, notch=False, showfliers=False, positions=[col], whis=[5,95])
 
-    for ax, dim_name in zip(axes, DIM_NAMES):
-        ax.set_title(f'Pose {dim_name.upper()} Dimension', size=24)
-        ax.tick_params(axis='x', labelsize=8)
-        ax.grid(axis='y')
+    if SHOW_PLOTS:
+        for ax, dim_name in zip(axes, DIM_NAMES):
+            ax.set_title(f'Pose {dim_name.upper()} Dimension', size=24)
+            ax.tick_params(axis='x', labelsize=8)
+            ax.grid(axis='y')
 
-    plt.subplots_adjust(hspace=0.50)
-    plt.show()
+        plt.subplots_adjust(hspace=0.50)
+        plt.show()
 
     POSE_MEAN = np.array([POSE_MEAN_X, POSE_MEAN_Y]).T
     POSE_STD = np.array([POSE_STD_X, POSE_STD_Y]).T
@@ -944,7 +966,7 @@ if not PREPROCESS_DATA and TRAIN_MODEL:
     print(f'# NaN Values In Prediction: {np.isnan(y_pred).sum()}')
 
 
-if not PREPROCESS_DATA and TRAIN_MODEL:
+if not PREPROCESS_DATA and TRAIN_MODEL and SHOW_PLOTS:
     plt.figure(figsize=(12,5))
     plt.title(f'Softmax Output Initialized Model | µ={y_pred.mean():.3f}, σ={y_pred.std():.3f}', pad=25)
     pd.Series(y_pred).plot(kind='hist', bins=128, label='Class Probability')
@@ -969,6 +991,8 @@ def lrfn(current_step, num_warmup_steps, lr_max, num_cycles=0.50, num_training_s
 
 
 def plot_lr_schedule(lr_schedule, epochs):
+    if not SHOW_PLOTS:
+        return
     fig = plt.figure(figsize=(20, 10))
     plt.plot([None] + lr_schedule + [None])
     # X Labels
@@ -1008,7 +1032,8 @@ def plot_lr_schedule(lr_schedule, epochs):
 # Learning rate for encoder
 LR_SCHEDULE = [lrfn(step, num_warmup_steps=N_WARMUP_EPOCHS, lr_max=LR_MAX, num_cycles=0.50) for step in range(N_EPOCHS)]
 # Plot Learning Rate Schedule
-plot_lr_schedule(LR_SCHEDULE, epochs=N_EPOCHS)
+if SHOW_PLOTS:
+    plot_lr_schedule(LR_SCHEDULE, epochs=N_EPOCHS)
 # Learning Rate Callback
 lr_callback = tf.keras.callbacks.LearningRateScheduler(lambda step: LR_SCHEDULE[step], verbose=1)
 
@@ -1127,6 +1152,8 @@ if USE_VAL:
 
 
 def plot_history_metric(metric, f_best=np.argmax, ylim=None, yscale=None, yticks=None):
+    if not SHOW_PLOTS:
+        return
     plt.figure(figsize=(20, 10))
     
     values = history.history[metric]
@@ -1175,17 +1202,17 @@ def plot_history_metric(metric, f_best=np.argmax, ylim=None, yscale=None, yticks
     plt.show()
 
 
-if TRAIN_MODEL:
+if TRAIN_MODEL and SHOW_PLOTS:
     plot_history_metric('loss', f_best=np.argmin)
 
 
-if TRAIN_MODEL:
+if TRAIN_MODEL and SHOW_PLOTS:
     plot_history_metric('acc', ylim=[0,1], yticks=np.arange(0.0, 1.1, 0.1))
 
-if TRAIN_MODEL:
+if TRAIN_MODEL and SHOW_PLOTS:
     plot_history_metric('top_5_acc', ylim=[0,1], yticks=np.arange(0.0, 1.1, 0.1))
 
-if TRAIN_MODEL:
+if TRAIN_MODEL and SHOW_PLOTS:
     plot_history_metric('top_10_acc', ylim=[0,1], yticks=np.arange(0.0, 1.1, 0.1))
 
 

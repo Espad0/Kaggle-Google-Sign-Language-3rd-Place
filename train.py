@@ -38,7 +38,7 @@ PREPROCESS_DATA = False  # Set to True to re-preprocess with INPUT_SIZE=32
 TRAIN_MODEL = True
 # True: use 10% of participants as validation set
 # False: use all data for training -> gives better LB result
-USE_VAL = False
+USE_VAL = True
 
 N_ROWS = 543
 N_DIMS = 3

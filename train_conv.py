@@ -22,7 +22,7 @@ from preprocess_data_conv import (
     LandmarkIndices,
     load_compressed,
     split_train_val,
-    prepare_data,
+    prepare_data as preprocess_prepare_data,
     print_shape_dtype,
     load_preprocessed_data,
     split_data
@@ -49,6 +49,9 @@ class Config:
     train_model: bool = True
     use_validation: bool = False
     show_plots: bool = False
+    
+    # Data preprocessing
+    generate_data: bool = False  # Set to True to generate data from raw files
     
     # Batch settings
     batch_all_signs_n: int = 2
@@ -94,8 +97,36 @@ def prepare_data() -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[Tuple],
     SIGN2ORD = train_df[['sign', 'sign_ord']].set_index('sign').squeeze().to_dict()
     ORD2SIGN = train_df[['sign_ord', 'sign']].set_index('sign_ord').squeeze().to_dict()
     
-    # Load preprocessed data
-    X, non_empty_frame_idxs, y = load_preprocessed_data()
+    # Check if we need to generate data or if files exist
+    data_files = ['X.zip', 'NON_EMPTY_FRAME_IDXS.zip', 'y.zip']
+    files_exist = all(os.path.exists(f) for f in data_files)
+    
+    if config.generate_data or not files_exist:
+        if not files_exist:
+            print("Preprocessed data files not found. Generating from raw data...")
+        else:
+            print("Generating data from raw files (generate_data=True)...")
+        
+        # Generate data using preprocessing pipeline
+        preprocess_config = {
+            'preprocess': True,
+            'use_validation': config.use_validation,
+            'show_plots': config.show_plots,
+            'analyze_stats': True
+        }
+        data = preprocess_prepare_data(preprocess_config)
+        
+        # Extract the arrays (remove synthetic NaN samples added by preprocessing)
+        X = load_compressed('X.zip')
+        non_empty_frame_idxs = load_compressed('NON_EMPTY_FRAME_IDXS.zip')
+        y = load_compressed('y.zip')
+        
+        print("Data generation complete!")
+    else:
+        # Load existing preprocessed data
+        print("Loading existing preprocessed data...")
+        X, non_empty_frame_idxs, y = load_preprocessed_data()
+    
     gc.collect()
     
     # Split data

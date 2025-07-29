@@ -18,9 +18,27 @@ import matplotlib.pyplot as plt
 import sklearn.metrics
 
 from preprocess_data_conv import (
-    N_ROWS, N_DIMS, SEED, NUM_CLASSES, INPUT_SIZE, N_COLS,
-    load_preprocessed_data, split_data, print_shape_dtype
+    Config as PreprocessConfig, 
+    LandmarkIndices,
+    load_compressed,
+    split_train_val,
+    prepare_data,
+    print_shape_dtype,
+    load_preprocessed_data,
+    split_data
 )
+
+# Create instances for constants
+preprocess_config = PreprocessConfig()
+landmarks = LandmarkIndices()
+
+# Map constants for compatibility
+N_ROWS = preprocess_config.N_ROWS
+N_DIMS = preprocess_config.N_DIMS  
+SEED = preprocess_config.SEED
+NUM_CLASSES = preprocess_config.NUM_CLASSES
+INPUT_SIZE = preprocess_config.INPUT_SIZE
+N_COLS = landmarks.n_cols
 
 
 # ======================== Configuration ========================

@@ -1,0 +1,4 @@
+TensorFlow V2.15.1
+Loading raw landmark data for calibration...
+Loaded 1000 raw samples with shape (1000, 543, 3)
+Model size: 4.83 MB

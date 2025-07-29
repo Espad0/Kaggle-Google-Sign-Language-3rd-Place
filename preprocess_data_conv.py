@@ -247,6 +247,11 @@ class PreprocessLayer(tf.keras.layers.Layer):
 # ================================
 # Data I/O Functions
 # ================================
+def print_shape_dtype(arrays: List[np.ndarray], names: List[str]):
+    """Print shape and dtype for list of arrays."""
+    for arr, name in zip(arrays, names):
+        print(f'{name} shape: {arr.shape}, dtype: {arr.dtype}')
+
 def load_parquet_landmarks(path: str) -> np.ndarray:
     """Load landmark data from parquet file."""
     df = pd.read_parquet(path, columns=['x', 'y', 'z'])
@@ -485,6 +490,33 @@ def prepare_data(config: Dict[str, bool] = None) -> Dict:
     
     print("\nData preparation complete!")
     return result
+
+# ================================
+# Backward Compatibility Functions
+# ================================
+def load_preprocessed_data() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load preprocessed data (backward compatibility)."""
+    X = load_compressed('X.zip')
+    frame_indices = load_compressed('NON_EMPTY_FRAME_IDXS.zip')
+    y = load_compressed('y.zip')
+    print_shape_dtype([X, frame_indices, y], ['X', 'NON_EMPTY_FRAME_IDXS', 'y'])
+    return X, frame_indices, y
+
+def split_data(X: np.ndarray, y: np.ndarray, 
+               frame_indices: np.ndarray,
+               train_df: pd.DataFrame,
+               use_val: bool = False) -> Tuple:
+    """Split data (backward compatibility)."""
+    if use_val:
+        split = split_train_val(X, y, frame_indices, train_df['participant_id'].values)
+        return (split['X_train'], split['y_train'], split['frames_train'], 
+                split['validation_data'], split['y_val'])
+    else:
+        nan_samples, nan_frames = create_nan_samples()
+        X_train = np.concatenate([X, nan_samples])
+        y_train = np.concatenate([y, np.zeros(len(nan_samples), dtype=np.int32)])
+        frames_train = np.concatenate([frame_indices, nan_frames])
+        return X_train, y_train, frames_train, None, None
 
 if __name__ == "__main__":
     # Run with default configuration

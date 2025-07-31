@@ -8,6 +8,9 @@ This repository contains the 3rd place solution developed by our team for the [G
 
 The competition challenged participants to build a computer vision system capable of recognizing isolated sign language gestures in real-world conditions. 
 
+![Sign Language Example](tv_sign.gif)
+![YouTube Sign Language Demo](tv_sign_youtube.gif)
+
 **Technical challenges:**
 
 - Different durations for each gesture
@@ -36,7 +39,7 @@ Our 3rd place solution leverages a sophisticated multi-model ensemble combining 
      - **V0EyesSparse**: Uses every 2nd eye landmark for efficiency
    - Strategic batch normalization after each conv layer
 
-### 🔧 Key Technical Innovations
+### 🔧 Key Technical Implementations
 
 #### 1. Advanced Preprocessing Pipeline
 ```python
@@ -134,63 +137,6 @@ outputs = 0.2*model_96frames +      # Long sequence model
 - **Dual preprocessing paths** with 50/50 averaging
 - **Random frame sampling** (r_long=True) vs deterministic sampling
 - **Multiple landmark configurations** (with/without eyes, sparse landmarks)
-
-## Technical Implementation
-
-### Dependencies
-- TensorFlow 2.x
-- TensorFlow Addons
-- NumPy, Pandas, Scikit-learn
-- TensorFlow Lite for deployment
-
-### Model Architecture Details
-
-#### Transformer Component
-- **Embedding dimension**: 256
-- **Number of heads**: 8
-- **Number of blocks**: 2
-- **MLP ratio**: 2
-- **Custom multi-head attention** (TFLite compatible)
-
-#### Conv1D Component
-- **Input sequences**: 32 frames
-- **Feature extraction**: 256 channels
-- **Depthwise multiplier**: 1-4x
-- **Global average pooling**
-- **Dense layers**: 768 units
-
-### Training Strategy
-- **Batch size**: 256
-- **Learning rate**: 1e-3 with AdamW
-- **Weight decay**: 1e-5
-- **N-fold cross-validation**: 5 folds
-- **Label smoothing**: Applied
-- **Data augmentation**: Time-based augmentation, shearing
-
-## Performance Metrics
-
-- **Validation Accuracy**: ~94%
-- **Top-5 Accuracy**: ~99%
-- **Model Size**: < 40MB (TFLite)
-- **Inference Speed**: Real-time capable
-
-## Code Quality & Standards
-
-The solution demonstrates:
-- ✅ **Modular design** with reusable preprocessing layers
-- ✅ **Clear documentation** and inline comments
-- ✅ **Efficient memory usage** for large-scale data
-- ✅ **Production-ready code** with TFLite conversion
-- ✅ **Comprehensive error handling** for missing data
-
-## Business Impact
-
-This solution showcases:
-1. **Problem-solving ability** in complex computer vision tasks
-2. **Deep learning expertise** with custom architectures
-3. **Production mindset** with size/speed constraints
-4. **Code quality** suitable for enterprise deployment
-5. **Innovation** in feature engineering and model design
 
 ## Repository Structure
 

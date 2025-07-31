@@ -34,7 +34,7 @@ mpl.rcParams['axes.titlesize'] = 24
 
 # If True, processing data from scratch
 # If False, loads preprocessed data
-PREPROCESS_DATA = False  # Set to True to re-preprocess with INPUT_SIZE=32
+PREPROCESS_DATA = True  # Set to True to re-preprocess with INPUT_SIZE=32
 TRAIN_MODEL = True
 # True: use 10% of participants as validation set
 # False: use all data for training -> gives better LB result

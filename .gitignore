@@ -55,3 +55,6 @@ Thumbs.db
 *.zip
 *.tflite
 *.h5
+
+# Old code backup
+old_code_backup/

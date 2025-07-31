@@ -8,6 +8,7 @@ Usage:
 """
 import argparse
 import sys
+import gc
 
 
 def main():
@@ -28,32 +29,30 @@ def main():
                         help='Batch size for training')
     parser.add_argument('--lr', type=float, default=1e-3,
                         help='Maximum learning rate')
+    parser.add_argument('--evaluate', action='store_true',
+                        help='Evaluate model on validation set')
     
     args = parser.parse_args()
     
-    # Import the appropriate modules based on model type
+    # Import configurations
+    from core import DataConfig, TrainingConfig, TransformerConfig, Conv1DConfig
+    
+    # Import the appropriate model based on model type
     if args.model == 'transformer':
-        from models.transformer import TransformerModel
-        from core.config import TransformerConfig as ModelConfig
+        from models import TransformerModel
+        model_config = TransformerConfig()
         model_class = TransformerModel
         weights_file = 'model.h5'
         tflite_file = 'model.tflite'
     else:
-        from models.conv1d import Conv1DModel  
-        from core.config import Conv1DConfig as ModelConfig
+        from models import Conv1DModel  
+        model_config = Conv1DConfig()
         model_class = Conv1DModel
         weights_file = 'model_conv.h5'
         tflite_file = 'model_conv.tflite'
     
-    # Import common modules
-    from core.config import DataConfig, TrainingConfig
-    from data.loader import prepare_data
-    from training.trainer import Trainer
-    from tflite.converter import convert_model_to_tflite
-    
     # Create configurations
     data_config = DataConfig()
-    model_config = ModelConfig()
     training_config = TrainingConfig(
         train_model=args.train,
         use_validation=args.validation,
@@ -66,27 +65,88 @@ def main():
     if args.train:
         print(f"Training {args.model} model...")
         
+        # Import data processing
+        from data_processing import prepare_data, calculate_mean_std_stats
+        from training import Trainer
+        
+        # Prepare data configuration
+        data_prep_config = {
+            'preprocess': args.preprocess,
+            'use_validation': args.validation,
+            'show_plots': False,
+            'analyze_stats': True
+        }
+        
         # Load data
-        data = prepare_data(data_config, training_config)
+        data = prepare_data(data_prep_config, model_type=args.model)
+        
+        # Calculate statistics for transformer model
+        stats = None
+        if args.model == 'transformer':
+            print("Calculating landmark statistics for transformer...")
+            from core import LandmarkIndices
+            landmarks = LandmarkIndices()
+            stats = calculate_mean_std_stats(data['X_train'], landmarks, data_config)
         
         # Create and train model
         model = model_class(data_config, model_config)
+        if stats:
+            model.build_model(stats)
+        
         trainer = Trainer(training_config)
+        
+        # Prepare training data
+        train_data = {
+            'X_train': data['X_train'],
+            'y_train': data['y_train'],
+            'NON_EMPTY_FRAME_IDXS_TRAIN': data['NON_EMPTY_FRAME_IDXS_TRAIN']
+        }
         
         history = trainer.train(
             model=model,
-            train_data=data['train'],
-            val_data=data.get('val'),
+            train_data=train_data,
+            val_data=data.get('validation_data'),
             weights_path=weights_file
         )
         
         print(f"Training complete! Weights saved to {weights_file}")
+        
+        # Cleanup
+        del data
+        gc.collect()
     
     if args.convert_tflite:
         print(f"Converting {args.model} model to TFLite...")
         
+        # Import conversion tools
+        from tflite import convert_model_to_tflite, verify_tflite_model
+        
+        # Load statistics for transformer
+        stats = None
+        if args.model == 'transformer':
+            try:
+                # Try to load from training data
+                from core import load_compressed, LandmarkIndices
+                from data_processing import calculate_mean_std_stats
+                
+                X_train = load_compressed('X_train.zip')
+                landmarks = LandmarkIndices()
+                stats = calculate_mean_std_stats(X_train, landmarks, data_config)
+                print("Calculated landmark statistics from training data")
+                del X_train
+                gc.collect()
+            except:
+                print("Warning: Using default landmark statistics")
+                stats = {
+                    'lips': (np.zeros((40, 2)), np.ones((40, 2))),
+                    'left_hand': (np.zeros((21, 2)), np.ones((21, 2))),
+                    'pose': (np.zeros((5, 2)), np.ones((5, 2)))
+                }
+        
         # Create model and load weights
         model = model_class(data_config, model_config)
+        if stats:
+            model.build_model(stats)
         model.load_weights(weights_file)
         
         # Convert to TFLite
@@ -96,12 +156,68 @@ def main():
             model_type=args.model
         )
         
+        # Verify if requested
+        verify_tflite_model(tflite_file)
+        
         print(f"Conversion complete! TFLite model saved to {tflite_file}")
     
-    if not args.train and not args.convert_tflite:
+    if args.evaluate:
+        if not args.validation:
+            print("Error: --evaluate requires --validation flag")
+            sys.exit(1)
+        
+        print(f"Evaluating {args.model} model...")
+        
+        # Import evaluation tools
+        from training import print_classification_report
+        from core import load_compressed
+        
+        # Load validation data
+        try:
+            X_val = load_compressed('X_val.zip')
+            y_val = load_compressed('y_val.zip')
+            frames_val = load_compressed('NON_EMPTY_FRAME_IDXS_VAL.zip')
+        except:
+            print("Error: Validation data not found. Run with --train --validation first")
+            sys.exit(1)
+        
+        # Load metadata
+        from core import load_metadata
+        _, sign2ord, ord2sign = load_metadata()
+        
+        # Load statistics for transformer
+        stats = None
+        if args.model == 'transformer':
+            try:
+                from core import LandmarkIndices
+                from data_processing import calculate_mean_std_stats
+                
+                X_train = load_compressed('X_train.zip')
+                landmarks = LandmarkIndices()
+                stats = calculate_mean_std_stats(X_train, landmarks, data_config)
+                del X_train
+                gc.collect()
+            except:
+                stats = {
+                    'lips': (np.zeros((40, 2)), np.ones((40, 2))),
+                    'left_hand': (np.zeros((21, 2)), np.ones((21, 2))),
+                    'pose': (np.zeros((5, 2)), np.ones((5, 2)))
+                }
+        
+        # Create model and load weights
+        model = model_class(data_config, model_config)
+        if stats:
+            model.build_model(stats)
+        model.load_weights(weights_file)
+        
+        # Evaluate
+        print_classification_report(model, X_val, y_val, frames_val, ord2sign, sign2ord)
+    
+    if not args.train and not args.convert_tflite and not args.evaluate:
         parser.print_help()
         sys.exit(1)
 
 
 if __name__ == "__main__":
+    import numpy as np
     main()

@@ -167,25 +167,25 @@ def prepare_data(config: Dict[str, bool] = None,
         
         # Save processed data
         print("Saving processed data...")
-        save_compressed(X, 'X.zip')
-        save_compressed(y, 'y.zip')
-        save_compressed(NON_EMPTY_FRAME_IDXS, 'NON_EMPTY_FRAME_IDXS.zip')
+        save_compressed(X, 'outputs/X.zip')
+        save_compressed(y, 'outputs/y.zip')
+        save_compressed(NON_EMPTY_FRAME_IDXS, 'outputs/NON_EMPTY_FRAME_IDXS.zip')
         
         # Also save in original format for backward compatibility
-        np.save('X.npy', X)
-        np.save('y.npy', y)
-        np.save('NON_EMPTY_FRAME_IDXS.npy', NON_EMPTY_FRAME_IDXS)
+        np.save('outputs/X.npy', X)
+        np.save('outputs/y.npy', y)
+        np.save('outputs/NON_EMPTY_FRAME_IDXS.npy', NON_EMPTY_FRAME_IDXS)
     else:
         print("\nLoading preprocessed data...")
         # Try compressed format first, fall back to original
         try:
-            X = load_compressed('X.zip')
-            y = load_compressed('y.zip')
-            NON_EMPTY_FRAME_IDXS = load_compressed('NON_EMPTY_FRAME_IDXS.zip')
+            X = load_compressed('outputs/X.zip')
+            y = load_compressed('outputs/y.zip')
+            NON_EMPTY_FRAME_IDXS = load_compressed('outputs/NON_EMPTY_FRAME_IDXS.zip')
         except FileNotFoundError:
-            X = np.load('X.npy')
-            y = np.load('y.npy')
-            NON_EMPTY_FRAME_IDXS = np.load('NON_EMPTY_FRAME_IDXS.npy')
+            X = np.load('outputs/X.npy')
+            y = np.load('outputs/y.npy')
+            NON_EMPTY_FRAME_IDXS = np.load('outputs/NON_EMPTY_FRAME_IDXS.npy')
     
     print(f"Data shape: {X.shape}, Memory: {(X.nbytes + NON_EMPTY_FRAME_IDXS.nbytes + y.nbytes) / 1e9:.2f} GB")
     
@@ -203,8 +203,8 @@ def prepare_data(config: Dict[str, bool] = None,
         print("Saving train/validation splits...")
         for key in ['X_train', 'y_train', 'NON_EMPTY_FRAME_IDXS_TRAIN',
                     'X_val', 'y_val', 'NON_EMPTY_FRAME_IDXS_VAL']:
-            np.save(f'{key}.npy', split_data[key])
-            save_compressed(split_data[key], f'{key}.zip')
+            np.save(f'outputs/{key}.npy', split_data[key])
+            save_compressed(split_data[key], f'outputs/{key}.zip')
         
         result = split_data
     else:

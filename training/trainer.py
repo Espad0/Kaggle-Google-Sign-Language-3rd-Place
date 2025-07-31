@@ -7,7 +7,7 @@ import numpy as np
 import tensorflow as tf
 
 from core import DataConfig, TrainingConfig
-from data_processing import get_train_batch_all_signs, create_batch_generator
+from processing import get_train_batch_all_signs, create_batch_generator
 from .losses import get_loss_function
 from .callbacks import get_callbacks
 

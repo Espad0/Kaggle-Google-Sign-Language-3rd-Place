@@ -9,12 +9,12 @@ import pandas as pd
 import tensorflow as tf
 
 from core import DataConfig, load_parquet_landmarks, load_metadata
-from data_processing import PreprocessLayer
+from processing import PreprocessLayer
 from .wrapper import TFLiteModel
 
 
 def convert_model_to_tflite(model: Union[tf.keras.Model, 'BaseModel'], 
-                           output_path: str = 'model.tflite',
+                           output_path: str = 'outputs/model.tflite',
                            model_type: str = 'transformer',
                            preprocess_layer: Optional[PreprocessLayer] = None,
                            use_optimization: bool = True) -> None:
@@ -64,8 +64,8 @@ def convert_model_to_tflite(model: Union[tf.keras.Model, 'BaseModel'],
     print(f"Model size: {len(tflite_model) / (1024 * 1024):.2f} MB")
 
 
-def create_submission_zip(tflite_path: str = 'model.tflite', 
-                         zip_path: str = 'submission.zip') -> None:
+def create_submission_zip(tflite_path: str = 'outputs/model.tflite', 
+                         zip_path: str = 'outputs/submission.zip') -> None:
     """Create submission zip file with TFLite model."""
     with zipfile.ZipFile(zip_path, 'w') as zipf:
         zipf.write(tflite_path, 'model.tflite')
@@ -96,7 +96,7 @@ def load_calibration_data(n_samples: int = 1000) -> np.ndarray:
     return np.array(raw_data, dtype=np.float32)
 
 
-def verify_tflite_model(tflite_path: str = 'model.tflite',
+def verify_tflite_model(tflite_path: str = 'outputs/model.tflite',
                        sample_idx: int = 5) -> None:
     """Verify TFLite model can be loaded and used for prediction."""
     try:

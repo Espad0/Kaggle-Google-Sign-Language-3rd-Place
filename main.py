@@ -42,14 +42,14 @@ def main():
         from models import TransformerModel
         model_config = TransformerConfig()
         model_class = TransformerModel
-        weights_file = 'model.h5'
-        tflite_file = 'model.tflite'
+        weights_file = 'outputs/model.h5'
+        tflite_file = 'outputs/model.tflite'
     else:
         from models import Conv1DModel  
         model_config = Conv1DConfig()
         model_class = Conv1DModel
-        weights_file = 'model_conv.h5'
-        tflite_file = 'model_conv.tflite'
+        weights_file = 'outputs/model_conv.h5'
+        tflite_file = 'outputs/model_conv.tflite'
     
     # Create configurations
     data_config = DataConfig()
@@ -66,7 +66,7 @@ def main():
         print(f"Training {args.model} model...")
         
         # Import data processing
-        from data_processing import prepare_data, calculate_mean_std_stats
+        from processing import prepare_data, calculate_mean_std_stats
         from training import Trainer
         
         # Prepare data configuration
@@ -127,7 +127,7 @@ def main():
             try:
                 # Try to load from training data
                 from core import load_compressed, LandmarkIndices
-                from data_processing import calculate_mean_std_stats
+                from processing import calculate_mean_std_stats
                 
                 X_train = load_compressed('X_train.zip')
                 landmarks = LandmarkIndices()
@@ -190,7 +190,7 @@ def main():
         if args.model == 'transformer':
             try:
                 from core import LandmarkIndices
-                from data_processing import calculate_mean_std_stats
+                from processing import calculate_mean_std_stats
                 
                 X_train = load_compressed('X_train.zip')
                 landmarks = LandmarkIndices()

@@ -5,7 +5,7 @@ import tensorflow as tf
 from typing import Optional
 
 from core import DataConfig, LandmarkIndices
-from data_processing import PreprocessLayer
+from processing import PreprocessLayer
 
 
 class TFLiteModel(tf.Module):

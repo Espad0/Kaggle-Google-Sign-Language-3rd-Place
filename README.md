@@ -19,45 +19,121 @@ The competition challenged participants to build a computer vision system capabl
 
 ### 🏗️ Model Ensemble Strategy
 
-My solution combines two complementary approaches:
+Our 3rd place solution leverages a sophisticated multi-model ensemble combining custom Transformer and Conv1D architectures:
 
-1. **Transformer Models** (3 variants)
-   - Custom multi-head attention implementation optimized for TFLite
-   - Separate embeddings for lips, hands, pose, and motion features
-   - Late dropout and positional encoding
-   - N-fold cross-validation
+1. **Transformer Models** (3 variants with 5-fold cross-validation)
+   - Custom MultiHeadAttention implementation specifically designed for TFLite compatibility
+   - Separate embeddings for lips (256 units), hands (256 units), pose (256 units), and motion (128 units)
+   - Late dropout with adaptive scheduling (starts at epoch 80)
+   - Positional encoding normalized by frame indices
 
-2. **Conv1D Models** (7 variants)
-   - Depthwise separable convolutions for efficiency
-   - Different preprocessing strategies (with/without eyes, pose landmarks)
-   - Batch normalization and strategic dropout
+2. **Conv1D Models** (7 specialized variants)
+   - Depthwise separable convolutions with depth multipliers 1-4x
+   - Multiple preprocessing strategies:
+     - **V0**: Base model with lips (40 points) + hands (21 points each)
+     - **V0Pose**: Adds 12 pose landmarks for body context
+     - **V0Eyes**: Incorporates 32 eye landmarks for facial expressions
+     - **V0EyesSparse**: Uses every 2nd eye landmark for efficiency
+   - Strategic batch normalization after each conv layer
 
 ### 🔧 Key Technical Innovations
 
 #### 1. Advanced Preprocessing Pipeline
 ```python
-- Dynamic frame normalization based on reference landmarks
-- Intelligent left/right hand detection and mirroring
-- Multiple landmark selection strategies (lips, hands, pose, eyes)
-- Adaptive sequence padding and downsampling
+# Landmark extraction strategy (543 total landmarks -> 106 selected)
+LIPS: 40 carefully selected mouth landmarks
+LEFT_HAND: 21 MediaPipe hand keypoints
+RIGHT_HAND: 21 MediaPipe hand keypoints  
+POSE: 8 upper body joints (shoulders, elbows, wrists, hips)
+EYES: 32 eye contour points (16 per eye)
+
+# Hand dominance detection and mirroring
+- Automatic detection of dominant hand per video
+- Mirror transformation for left-handed signers
+- Ensures consistent feature representation
 ```
 
-#### 2. Motion Feature Engineering
-- Frame-to-frame motion vectors
-- Motion magnitude calculations
-- Normalized by local statistics for robustness
+#### 2. Intelligent Frame Sampling
+- **Fixed 32-frame sequences** for consistent input size
+- **Adaptive downsampling** for videos > 32 frames:
+  - Random frame selection weighted by hand visibility
+  - Preserves frames with clear hand gestures
+- **Smart padding** for videos < 32 frames:
+  - Edge padding with random offset to prevent overfitting
+  - NaN masking for missing landmarks
 
-#### 3. Landmark-Specific Embeddings
-- Separate embedding networks for different body parts
-- Learnable attention weights for feature fusion
-- Empty frame handling with trainable embeddings
-
-#### 4. Model Ensemble Weighting
+#### 3. Motion Feature Engineering
 ```python
-outputs = 0.2*conv1d_1 + 0.2*conv1d_2 + 0.3*conv1d_3 + 
-          0.3*conv1d_4 + 0.3*conv1d_5 + 0.3*conv1d_6 + 
-          1.5*transformer_ensemble
+# Compute frame-to-frame differences
+motion = frames[t] - frames[t-1]
+# Add motion magnitude as additional channel
+motion_dist = sqrt(mean(motion^2))
+# 106 landmarks × 3 channels (dx, dy, magnitude)
 ```
+
+#### 4. Landmark-Specific Embeddings with Attention
+- Each landmark group has dedicated embedding network
+- **Learnable soft attention weights** combine features:
+  ```python
+  weights = softmax([w_lips, w_hands, w_pose])
+  combined = weights[0]*lips + weights[1]*hands + weights[2]*pose
+  ```
+- Empty landmark handling with trainable embeddings
+
+#### 5. Test-Time Augmentation (TTA)
+```python
+# Each Conv1D model uses dual preprocessing at inference:
+x = preprocess_layer[0](inputs)  # Standard preprocessing
+x1 = preprocess_layer[1](inputs) # With random frame sampling (r_long=True)
+outputs = 0.5*model(x) + 0.5*model(x1)  # Average predictions
+
+# TTA strategies:
+- Random frame sampling for long videos
+- Random padding offsets for short videos
+- Ensures robust predictions across video variations
+```
+
+#### 6. Optimized Model Ensemble
+```python
+# Final ensemble with carefully tuned weights
+outputs = 0.2*model_96frames +      # Long sequence model
+          0.2*model_32frames +       # Base Conv1D
+          0.3*model_32pose +         # With pose landmarks
+          0.3*model_32eyes +         # With eye tracking
+          0.3*model_frankv2 +        # Enhanced preprocessing
+          0.3*model_mu0 +            # Zero-mean normalization
+          1.5*transformer_ensemble   # Main transformer models
+```
+
+### 📊 Data Augmentation Strategies
+
+#### Training-Time Augmentations
+1. **Hand Mirroring**
+   - Automatic left/right hand detection per video
+   - Horizontal flip transformation matrix for left-handed signers
+   - Ensures model learns both hand orientations
+
+2. **Frame-Level Augmentations**
+   - **Random padding offsets**: For videos < 32 frames, random positioning within padded sequence
+   - **Dynamic frame sampling**: Weighted selection based on hand visibility for videos > 32 frames
+   - **Late dropout scheduling**: Starts at epoch 80 to prevent early overfitting
+
+3. **Normalization Strategies**
+   - **Per-video normalization**: Using reference landmarks (shoulders, nose, eyes)
+   - **Zero-mean variants**: Some models trained with μ=0 normalization
+   - **Local statistics**: Separate normalization for each landmark group
+
+4. **CutMix Augmentation** (Custom Implementation)
+   - Mixed samples from different sign language classes
+   - **Weighted label assignment**:
+     - Hand landmarks: 0.7 weight (primary signal)
+     - Other landmarks (lips, pose): 0.3 weight (context)
+   - Helps model learn robust features across different signers
+
+#### Test-Time Augmentations (TTA)
+- **Dual preprocessing paths** with 50/50 averaging
+- **Random frame sampling** (r_long=True) vs deterministic sampling
+- **Multiple landmark configurations** (with/without eyes, sparse landmarks)
 
 ## Technical Implementation
 

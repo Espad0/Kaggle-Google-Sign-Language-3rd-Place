@@ -1,14 +1,60 @@
 """
-Main entry point for training sign language recognition models.
+Main entry point for training, evaluating, and converting sign language recognition models.
 
-Usage:
+This script provides a unified interface for:
+- Training transformer or Conv1D models on sign language data
+- Converting trained models to TensorFlow Lite format
+- Evaluating model performance on validation sets
+- Preprocessing data from scratch when needed
+
+Usage Examples:
+    # Train a transformer model
     python main.py --model transformer --train
+    
+    # Train a Conv1D model with validation split
     python main.py --model conv1d --train --validation
+    
+    # Train with custom hyperparameters
+    python main.py --model transformer --train --epochs 150 --batch-size 32 --lr 0.001
+    
+    # Preprocess data from scratch before training
+    python main.py --model transformer --train --preprocess
+    
+    # Convert a trained model to TFLite format
     python main.py --model transformer --convert-tflite
+    
+    # Evaluate model performance (requires validation data)
+    python main.py --model transformer --evaluate --validation
+
+Arguments:
+    --model: Model type to use (transformer or conv1d)
+    --train: Train the model
+    --convert-tflite: Convert trained model to TFLite format
+    --validation: Use validation split for training/evaluation
+    --preprocess: Preprocess data from scratch
+    --epochs: Number of training epochs (default: 100)
+    --batch-size: Batch size for training (default: 64)
+    --lr: Maximum learning rate (default: 0.001)
+    --evaluate: Evaluate model on validation set
+
+Output Files:
+    - Transformer model weights: outputs/model.h5
+    - Conv1D model weights: outputs/model_conv.h5
+    - TFLite models: outputs/model.tflite or outputs/model_conv.tflite
 """
 import argparse
 import sys
 import gc
+import numpy as np
+
+from core import (
+    DataConfig, TrainingConfig, TransformerConfig, Conv1DConfig,
+    LandmarkIndices, load_compressed, load_metadata
+)
+from models import TransformerModel, Conv1DModel
+from processing import prepare_data, calculate_mean_std_stats
+from training import Trainer, print_classification_report
+from tflite import convert_model_to_tflite, verify_tflite_model
 
 
 def main():
@@ -34,18 +80,13 @@ def main():
     
     args = parser.parse_args()
     
-    # Import configurations
-    from core import DataConfig, TrainingConfig, TransformerConfig, Conv1DConfig
-    
-    # Import the appropriate model based on model type
+    # Select the appropriate model based on model type
     if args.model == 'transformer':
-        from models import TransformerModel
         model_config = TransformerConfig()
         model_class = TransformerModel
         weights_file = 'outputs/model.h5'
         tflite_file = 'outputs/model.tflite'
     else:
-        from models import Conv1DModel  
         model_config = Conv1DConfig()
         model_class = Conv1DModel
         weights_file = 'outputs/model_conv.h5'
@@ -65,10 +106,6 @@ def main():
     if args.train:
         print(f"Training {args.model} model...")
         
-        # Import data processing
-        from processing import prepare_data, calculate_mean_std_stats
-        from training import Trainer
-        
         # Prepare data configuration
         data_prep_config = {
             'preprocess': args.preprocess,
@@ -84,7 +121,6 @@ def main():
         stats = None
         if args.model == 'transformer':
             print("Calculating landmark statistics for transformer...")
-            from core import LandmarkIndices
             landmarks = LandmarkIndices()
             stats = calculate_mean_std_stats(data['X_train'], landmarks, data_config)
         
@@ -118,17 +154,11 @@ def main():
     if args.convert_tflite:
         print(f"Converting {args.model} model to TFLite...")
         
-        # Import conversion tools
-        from tflite import convert_model_to_tflite, verify_tflite_model
-        
         # Load statistics for transformer
         stats = None
         if args.model == 'transformer':
             try:
                 # Try to load from training data
-                from core import load_compressed, LandmarkIndices
-                from processing import calculate_mean_std_stats
-                
                 X_train = load_compressed('X_train.zip')
                 landmarks = LandmarkIndices()
                 stats = calculate_mean_std_stats(X_train, landmarks, data_config)
@@ -168,10 +198,6 @@ def main():
         
         print(f"Evaluating {args.model} model...")
         
-        # Import evaluation tools
-        from training import print_classification_report
-        from core import load_compressed
-        
         # Load validation data
         try:
             X_val = load_compressed('X_val.zip')
@@ -182,16 +208,12 @@ def main():
             sys.exit(1)
         
         # Load metadata
-        from core import load_metadata
         _, sign2ord, ord2sign = load_metadata()
         
         # Load statistics for transformer
         stats = None
         if args.model == 'transformer':
             try:
-                from core import LandmarkIndices
-                from processing import calculate_mean_std_stats
-                
                 X_train = load_compressed('X_train.zip')
                 landmarks = LandmarkIndices()
                 stats = calculate_mean_std_stats(X_train, landmarks, data_config)
@@ -219,5 +241,4 @@ def main():
 
 
 if __name__ == "__main__":
-    import numpy as np
     main()

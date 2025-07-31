@@ -84,7 +84,7 @@ def convert_tflite(tflite_model, tflite_path, X_train):
         f.write(tflite_model_ser)
 
 
-def load_raw_data(train_csv_path='train.csv', train_landmark_dir='train_landmark_files', n_samples=1000):
+def load_raw_data(train_csv_path='data/train.csv', train_landmark_dir='data/train_landmark_files', n_samples=1000):
     """Load raw landmark data for calibration"""
     # Read train.csv to get file paths
     train_df = pd.read_csv(train_csv_path)

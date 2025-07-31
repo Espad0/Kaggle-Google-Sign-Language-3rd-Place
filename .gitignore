@@ -1,5 +1,5 @@
 # Ignore train landmark files folder
-train_landmark_files/
+data/train_landmark_files/
 
 # Python
 __pycache__/

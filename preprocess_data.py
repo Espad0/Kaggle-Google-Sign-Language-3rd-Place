@@ -610,7 +610,7 @@ def prepare_data(preprocess: bool = True,
     
     # Load metadata
     print("Loading metadata...")
-    train_df = pd.read_csv('train.csv')
+    train_df = pd.read_csv('data/train.csv')
     train_df['file_path'] = train_df['path'].apply(lambda x: f'./{x}')
     train_df['sign_ord'] = train_df['sign'].astype('category').cat.codes
     

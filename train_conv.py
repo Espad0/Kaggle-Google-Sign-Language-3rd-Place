@@ -90,7 +90,7 @@ print(f'TensorFlow V{tf.__version__}')
 def prepare_data() -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[Tuple], Optional[np.ndarray], Dict, Dict]:
     """Load and prepare training data"""
     # Load metadata
-    train_df = pd.read_csv('train.csv')
+    train_df = pd.read_csv('data/train.csv')
     train_df['file_path'] = train_df['path'].apply(lambda path: f'./{path}')
     train_df['sign_ord'] = train_df['sign'].astype('category').cat.codes
     

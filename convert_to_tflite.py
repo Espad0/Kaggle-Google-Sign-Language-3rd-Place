@@ -99,7 +99,7 @@ def create_submission_zip(tflite_path: str = 'model.tflite',
 
 
 def verify_tflite_model(tflite_path: str = 'model.tflite',
-                       train_csv_path: str = 'train.csv',
+                       train_csv_path: str = 'data/train.csv',
                        sample_idx: int = 5) -> None:
     """Verify TFLite model can be loaded and used for prediction."""
     # Load train data to get a sample

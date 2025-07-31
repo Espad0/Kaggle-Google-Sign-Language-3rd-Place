@@ -1,14 +1,62 @@
 #!/usr/bin/env python3
 """
-ASL Samples Visualizer
+ASL Landmark Visualizer
 
-This script provides visualization tools for American Sign Language (ASL) landmarks.
-It can create animated 2D visualizations or mean frame visualizations from parquet files.
+A comprehensive visualization tool for American Sign Language (ASL) landmarks from the
+Google Isolated Sign Language Recognition dataset. This script provides multiple ways
+to visualize sign language gestures including animations, static mean frames, and
+interactive dashboards.
 
-Usage:
-    python samples_visualizer.py --sequence_id 1002052130 --mode animation
-    python samples_visualizer.py --sign "blow" --mode mean --output output.html
-    python samples_visualizer.py --dashboard --data_dir /path/to/data
+Features:
+    - Animated 2D visualizations with landmark connections
+    - Static mean frame visualizations showing average positions
+    - GIF export for animations (matplotlib-based)
+    - HTML export for interactive Plotly visualizations
+    - Interactive dashboard mode with sign/sequence selection
+    - Color-coded landmarks: red (face), blue (hands), green (pose)
+    - Automatic handling of missing landmarks
+
+Basic Usage Examples:
+    # View an animation in browser
+    python visualizer.py --sequence_id 1002052130 --show
+    
+    # Save animation as GIF
+    python visualizer.py --sequence_id 1002052130 --output tv_sign.gif
+    
+    # Save animation as interactive HTML
+    python visualizer.py --sequence_id 1002052130 --output tv_sign.html
+    
+    # Visualize by sign name (uses first sequence)
+    python visualizer.py --sign "blow" --output blow.gif
+
+Advanced Usage Examples:
+    # High-quality GIF with custom settings
+    python visualizer.py --sequence_id 1002052130 --output hq_sign.gif --fps 20 --width 10 --height 8
+    
+    # Create mean frame visualization
+    python visualizer.py --sign "cloud" --mode mean --output cloud_mean.html
+    
+    # Generate both animation and mean frame
+    python visualizer.py --sequence_id 1187993400 --mode both --output outputs/analysis
+    
+    # Launch interactive dashboard
+    python visualizer.py --dashboard
+    
+    # Use custom data directory
+    python visualizer.py --data_dir /path/to/asl/data --sequence_id 1002052130 --show
+    
+    # Dashboard on custom port
+    python visualizer.py --dashboard --port 8080
+
+Output Formats:
+    - .gif: Animated GIF using matplotlib (requires matplotlib, PIL)
+    - .html: Interactive Plotly visualization
+    - Dashboard: Real-time web interface (requires dash, jupyter_dash)
+
+Dependencies:
+    Required: pandas, plotly, pyarrow
+    For GIF: matplotlib, Pillow
+    For Dashboard: dash, jupyter_dash, dash-bootstrap-components
 """
 
 import argparse
@@ -532,10 +580,10 @@ def main():
         # Check if output is GIF
         if args.output and args.output.lower().endswith('.gif'):
             visualizer.save_as_gif(parquet_df, args.output, 
-                                 f"{sign_cat} - Sequence {sequence_id}",
+                                 f"Sign: {sign_cat}",
                                  fps=args.fps, width=args.width, height=args.height)
         else:
-            fig = visualizer.visualize_2d_animation(parquet_df, f"{sign_cat} - Sequence {sequence_id}")
+            fig = visualizer.visualize_2d_animation(parquet_df, f"Sign: {sign_cat}")
             if args.output:
                 fig.write_html(args.output)
                 print(f"Saved visualization to {args.output}")
@@ -543,7 +591,7 @@ def main():
                 fig.show()
                 
     elif args.mode == 'mean':
-        fig = visualizer.visualize_mean_frame(parquet_df, f"{sign_cat} - Mean Frame")
+        fig = visualizer.visualize_mean_frame(parquet_df, f"Sign: {sign_cat} (Mean Frame)")
         if args.output:
             if args.output.lower().endswith('.gif'):
                 print("GIF export is only available for animation mode, not mean frame")
@@ -560,23 +608,23 @@ def main():
             # Handle GIF export for animation
             if ext.lower() == '.gif':
                 visualizer.save_as_gif(parquet_df, f"{base}_animation.gif",
-                                     f"{sign_cat} - Animation",
+                                     f"Sign: {sign_cat}",
                                      fps=args.fps, width=args.width, height=args.height)
                 # Save mean frame as HTML
-                fig2 = visualizer.visualize_mean_frame(parquet_df, f"{sign_cat} - Mean Frame")
+                fig2 = visualizer.visualize_mean_frame(parquet_df, f"Sign: {sign_cat} (Mean Frame)")
                 fig2.write_html(f"{base}_mean.html")
                 print(f"Saved to {base}_animation.gif and {base}_mean.html")
             else:
                 # Save both as HTML
-                fig1 = visualizer.visualize_2d_animation(parquet_df, f"{sign_cat} - Animation")
-                fig2 = visualizer.visualize_mean_frame(parquet_df, f"{sign_cat} - Mean Frame")
+                fig1 = visualizer.visualize_2d_animation(parquet_df, f"Sign: {sign_cat}")
+                fig2 = visualizer.visualize_mean_frame(parquet_df, f"Sign: {sign_cat} (Mean Frame)")
                 fig1.write_html(f"{base}_animation{ext}")
                 fig2.write_html(f"{base}_mean{ext}")
                 print(f"Saved to {base}_animation{ext} and {base}_mean{ext}")
         
         if args.show:
-            fig1 = visualizer.visualize_2d_animation(parquet_df, f"{sign_cat} - Animation")
-            fig2 = visualizer.visualize_mean_frame(parquet_df, f"{sign_cat} - Mean Frame")
+            fig1 = visualizer.visualize_2d_animation(parquet_df, f"Sign: {sign_cat}")
+            fig2 = visualizer.visualize_mean_frame(parquet_df, f"Sign: {sign_cat} (Mean Frame)")
             fig1.show()
             fig2.show()
 

@@ -345,13 +345,6 @@ Kaggle-Google-Sign-Language-3rd-Place/
     └── submission.zip    # Competition submission files
 ```
 
-## How to Run
-
-1. Clone the repository
-2. Install dependencies: `pip install tensorflow tensorflow-addons pandas numpy`
-3. Open the Jupyter notebook
-4. Run all cells to reproduce the solution
-
 ## Experiments That Didn't Make Final Solution
 
 1. **Synthetic Data Generation**
@@ -366,17 +359,7 @@ Kaggle-Google-Sign-Language-3rd-Place/
    - Achieved ~0.005-0.007 increase in local CV score
    - Ultimately abandoned and didn't use in final LB submissions
 
-## Future Improvements
-
-- Experiment with vision transformers (ViT)
-- Implement knowledge distillation for smaller models
-- Add temporal convolutions for better motion modeling
-- Explore self-supervised pretraining on unlabeled videos
 
 ## Contact
 
 Feel free to reach out if you have questions about the implementation or would like to discuss the approach in more detail.
-
----
-
-*This solution demonstrates practical deep learning skills applied to a challenging real-world problem, achieving top-tier results in a competitive environment.*

@@ -20,6 +20,111 @@ The competition challenged participants to build a computer vision system capabl
 
 ## Solution Architecture
 
+### 📐 Model Architectures
+
+#### Conv1D Model Implementation
+```python
+# Conv1D Model Architecture - Functional API
+inputs = Input(shape=(32, 66, 2), name='frames')
+x = Reshape((32, 66*2))(inputs)
+
+# First Conv Block
+x = Conv1D(64, 1, strides=1, padding='valid', activation='relu')(x)
+x = BatchNormalization()(x)
+x = DepthwiseConv1D(3, strides=1, padding='valid', depth_multiplier=1, activation='relu')(x)
+x = BatchNormalization()(x)
+
+# Second Conv Block with downsampling
+x = Conv1D(64, 1, strides=1, padding='valid', activation='relu')(x)
+x = BatchNormalization()(x)
+x = DepthwiseConv1D(5, strides=2, padding='valid', depth_multiplier=4, activation='relu')(x)
+x = BatchNormalization()(x)
+
+x = MaxPool1D(2, 2)(x)
+
+# Third Conv Block
+x = Conv1D(256, 1, strides=1, padding='valid', activation='relu')(x)
+x = BatchNormalization()(x)
+x = DepthwiseConv1D(3, strides=1, padding='valid', depth_multiplier=1, activation='relu')(x)
+x = BatchNormalization()(x)
+
+# Fourth Conv Block with downsampling
+x = Conv1D(256, 1, strides=1, padding='valid', activation='relu')(x)
+x = BatchNormalization()(x)
+x = DepthwiseConv1D(3, strides=2, padding='valid', depth_multiplier=4, activation='relu')(x)
+x = BatchNormalization()(x)
+
+# Global pooling and classification
+x = GlobalAvgPool1D()(x)
+x = Dropout(rate=0.4)(x)
+
+x = Dense(1024, activation='relu')(x)
+x = BatchNormalization()(x)
+x = Dropout(rate=0.4)(x)
+
+x = Dense(1024, activation='relu')(x)
+x = BatchNormalization()(x)
+x = Dropout(rate=0.4)(x)
+
+outputs = Dense(250, activation='softmax')(x)
+
+model = Model(inputs=inputs, outputs=outputs)
+```
+
+#### Transformer Model Implementation
+```python
+# Transformer Model Architecture (Functional API)
+def build_transformer():
+    # Inputs
+    frames = Input(shape=(32, 66, 3), name='frames')
+    non_empty_frame_idxs = Input(shape=(32,), name='non_empty_frame_idxs')
+    
+    # Extract x,y coordinates only (drop z)
+    x = Lambda(lambda x: x[:, :, :, :2])(frames)
+    
+    # Split landmarks
+    lips = Lambda(lambda x: x[:, :, 0:40, :])(x)      # 40 lip points
+    left_hand = Lambda(lambda x: x[:, :, 40:61, :])(x) # 21 hand points
+    pose = Lambda(lambda x: x[:, :, 61:66, :])(x)      # 5 pose points
+    
+    # Landmark-specific embeddings
+    lips_embedding = LandmarkEmbedding(256, 'lips')(lips)
+    left_hand_embedding = LandmarkEmbedding(256, 'left_hand')(left_hand)
+    pose_embedding = LandmarkEmbedding(256, 'pose')(pose)
+    
+    # Combine embeddings with learnable weights
+    x = WeightedAverage()([lips_embedding, left_hand_embedding, pose_embedding])
+    
+    # Add positional encoding
+    x = PositionalEmbedding()(x, non_empty_frame_idxs)
+    
+    # Transformer blocks (3 blocks, 8 heads each)
+    for i in range(3):
+        # Multi-head attention
+        attn = MultiHeadAttention(
+            d_model=256, 
+            num_heads=8
+        )(x, attention_mask=mask)
+        x = Add()([x, attn])  # Residual connection
+        
+        # Feed-forward network
+        ffn = Sequential([
+            Dense(256 * 4, activation='gelu'),
+            Dropout(0.1),
+            Dense(256)
+        ])(x)
+        x = Add()([x, ffn])  # Residual connection
+    
+    # Pooling with mask
+    x = MaskedGlobalAveragePooling1D()(x, mask)
+    
+    # Classification head
+    x = Dropout(0.5)(x)
+    outputs = Dense(250, activation='softmax')(x)
+    
+    return Model(inputs=[frames, non_empty_frame_idxs], outputs=outputs)
+```
+
 ### 🏗️ Model Ensemble Strategy
 
 Our 3rd place solution leverages a sophisticated multi-model ensemble combining custom Transformer and Conv1D architectures:

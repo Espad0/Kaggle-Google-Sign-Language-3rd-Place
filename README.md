@@ -301,10 +301,48 @@ outputs = 0.5*model(x) + 0.5*model(x1)  # Average predictions
 ## Repository Structure
 
 ```
-ISL/
-├── transformer-conv1d-isl-submission-n-fold-and-conv1.ipynb  # Main solution notebook
-├── README.md                                                   # This file
-└── model.tflite                                               # Deployed model (generated)
+Kaggle-Google-Sign-Language-3rd-Place/
+├── README.md              # Project documentation
+├── main.py               # Main entry point for training and inference
+├── visualizer.py         # Visualization utilities
+├── tv_sign.gif           # Example sign language animation
+├── tv_sign_youtube.gif   # YouTube demo animation
+├── core/                 # Core functionality
+│   ├── __init__.py
+│   ├── config.py         # Configuration settings
+│   ├── landmarks.py      # Landmark extraction and handling
+│   └── utils.py          # Utility functions
+├── data/                 # Dataset files
+│   ├── train.csv         # Training metadata
+│   └── train_landmark_files/  # MediaPipe landmark parquet files
+│       └── 16069/        # Participant folders containing .parquet files
+├── models/               # Model architectures
+│   ├── __init__.py
+│   ├── base.py           # Base model classes
+│   ├── conv1d.py         # Conv1D model implementation
+│   └── transformer.py    # Transformer model implementation
+├── processing/           # Data processing pipeline
+│   ├── __init__.py
+│   ├── generator.py      # Data generators for training
+│   ├── loader.py         # Data loading utilities
+│   ├── preprocessing.py  # Preprocessing functions
+│   └── statistics.py     # Data statistics and analysis
+├── training/             # Training pipeline
+│   ├── __init__.py
+│   ├── callbacks.py      # Custom callbacks
+│   ├── evaluation.py     # Model evaluation metrics
+│   ├── losses.py         # Custom loss functions
+│   └── trainer.py        # Training orchestration
+├── tflite/               # TensorFlow Lite conversion
+│   ├── __init__.py
+│   ├── converter.py      # TFLite conversion utilities
+│   └── wrapper.py        # TFLite model wrapper
+└── outputs/              # Model outputs and artifacts
+    ├── *.npy             # Preprocessed numpy arrays
+    ├── *.h5              # Saved Keras models
+    ├── *.tflite          # Converted TFLite models
+    ├── conversion_log.txt # TFLite conversion logs
+    └── submission.zip    # Competition submission files
 ```
 
 ## How to Run

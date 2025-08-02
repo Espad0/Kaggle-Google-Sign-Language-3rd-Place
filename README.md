@@ -12,7 +12,6 @@ The competition challenged participants to build a computer vision system capabl
 ![YouTube Sign Language Demo](tv_sign_youtube.gif)
 
 **Technical challenges:**
-
 - Different durations for each gesture
 - Missing/incomplete data, frequent landmark occlusions
 - Tensorflow Lite models for mobile devices with 40MB size limit
@@ -27,6 +26,7 @@ We ensemble Transformers and Conv1D architectures, with custom preprocessing for
 ### 📐 Model Architectures
 
 #### Conv1D Model Implementation
+
 ```python
 # Conv1D Model Architecture (Sequential API - as in solution)
 do = 0.5
@@ -73,6 +73,7 @@ model.add(Dense(250, activation='softmax'))
 ```
 
 #### Transformer Model Implementation
+
 ```python
 # Transformer Model Architecture (Functional API)
 def build_transformer():
@@ -128,47 +129,56 @@ def build_transformer():
 
 ### 🏗️ Model Ensemble
 
-1. **Transformer Models** (3 variants with 5-fold cross-validation)
-   - Custom MultiHeadAttention implementation for TFLite compatibility
-   - Two architecture types:
-     - **Type 1**: Separate embeddings for each part (lips, hands, pose) - LB 0.77+
-     - **Type 2**: Single embedding for whole xyz sequence - LB 0.768
-   - Separate embeddings for lips (256 units), hands (256 units), pose (256 units), and motion (128 units)
-   - Positional encoding normalized by frame indices
-   - **Augmentations**:
-     - **Global**: rotation(-10,10), shift(-0.1,0.1), scale(0.8,1.2), shear(-1.0,1.0), flip for some signs
-     - **Time-based**: random augment 1-8 frames, random drop frames (fill with 0.0)
-   - **Hyperparameters**: NUM_BLOCKS=2, NUM_HEAD=8, lr=1e-3, AdamW, 100 epochs, LateDropout=0.2-0.3, LabelSmoothing=0.5
+#### 1. Transformer Models (3 variants with 5-fold cross-validation)
 
-2. **Conv1D Models** (6 specialized variants)
-   - Depthwise separable convolutions (DepthwiseConv1D) with depth multipliers 1-4x
-   - Utilized native TFLite layers for optimal mobile performance
-   - Multiple preprocessing strategies:
-     - **Base model**: lips + hands (21 points each)  
-     - **Pose variant**: Adds pose landmarks for body context
-     - **Eyes variant**: Incorporates 32 eye landmarks for facial expressions
-     - **Sparse variant**: Uses every 2nd eye/lip landmark for efficiency
-     - **Single hand**: Only dominant hand with mirroring
-     - **96 frames**: Extended sequence length model
+- Custom MultiHeadAttention implementation for TFLite compatibility
+- Two architecture types:
+  - **Type 1**: Separate embeddings for each part (lips, hands, pose) - LB 0.77+
+  - **Type 2**: Single embedding for whole xyz sequence - LB 0.768
+- Separate embeddings for lips (256 units), hands (256 units), pose (256 units), and motion (128 units)
+- Positional encoding normalized by frame indices
+
+**Augmentations:**
+- **Global**: rotation (-10°, 10°), shift (-0.1, 0.1), scale (0.8, 1.2), shear (-1.0, 1.0), flip for some signs
+- **Time-based**: random augment 1-8 frames, random drop frames (fill with 0.0)
+
+**Hyperparameters:** 
+- `NUM_BLOCKS=2`, `NUM_HEAD=8`
+- Learning rate: 1e-3, AdamW optimizer
+- 100 epochs
+- LateDropout: 0.2-0.3
+- LabelSmoothing: 0.5
+
+#### 2. Conv1D Models (6 specialized variants)
+
+- Depthwise separable convolutions (DepthwiseConv1D) with depth multipliers 1-4x
+- Utilized native TFLite layers for optimal mobile performance
+- Multiple preprocessing strategies:
+  - **Base model**: lips + hands (21 points each)  
+  - **Pose variant**: Adds pose landmarks for body context
+  - **Eyes variant**: Incorporates 32 eye landmarks for facial expressions
+  - **Sparse variant**: Uses every 2nd eye/lip landmark for efficiency
+  - **Single hand**: Only dominant hand with mirroring
+  - **96 frames**: Extended sequence length model
 
 ### 🔧 Technical Implementations
 
 #### 1. Preprocessing Pipeline
-```python
-# Landmark extraction strategy (543 total landmarks -> 102 selected)
-LIPS: 20 carefully selected mouth landmarks
-HANDS: 42 total hand keypoints (21 left + 21 right)
-POSE: 8 upper body joints (shoulders, elbows, wrists, hips)
-EYES: 32 eye contour points (16 per eye)
 
-# Hand dominance detection and mirroring
+**Landmark extraction strategy** (543 total landmarks → 102 selected):
+- **LIPS**: 20 carefully selected mouth landmarks
+- **HANDS**: 42 total hand keypoints (21 left + 21 right)
+- **POSE**: 8 upper body joints (shoulders, elbows, wrists, hips)
+- **EYES**: 32 eye contour points (16 per eye)
+
+**Hand dominance detection and mirroring**:
 - Automatic detection of dominant hand per video
 - Mirror transformation for left-handed signers
 - Ensures consistent feature representation
 
-# Reference point normalization
+**Reference point normalization**:
 - The input sequence is normalized with shoulder, hip, lip and eyes points
-- Uses specific landmarks for coordinate normalization: [500, 501, 512, 513, 159, 386, 13]
+- Uses specific landmarks for coordinate normalization: `[500, 501, 512, 513, 159, 386, 13]`
   - 500, 501: Left and right shoulders from pose landmarks
   - 512, 513: Left and right hips from pose landmarks
   - 159, 386: Key facial landmarks (likely nose bridge or face center points)
@@ -179,9 +189,9 @@ EYES: 32 eye contour points (16 per eye)
   - Distance from camera
   - Body size differences
 - Note: We didn't use the depth dimension for normalization
-```
 
 #### 2. Frame Sampling
+
 - **Fixed 32-frame sequences** for consistent input size (96 frames for one model)
 - **We didn't throw away frames without hands** but took hand presence into account during TTA
 - **Adaptive downsampling** for videos > 32 frames:
@@ -193,20 +203,20 @@ EYES: 32 eye contour points (16 per eye)
   - Random left/right padding during TTA
 
 #### 3. Motion Feature Engineering
-```python
-# Compute frame-to-frame differences
-(dx, dy)_t = xyz_t - xyz_{t-1}
 
-# Create motion embedding with 3 channels
-motion_input = (dx, dy, sqrt(dx^2 + dy^2))_t
+**Compute frame-to-frame differences**:
+- `(dx, dy)_t = xyz_t - xyz_{t-1}`
 
-# Final embedding is concatenation of motion embedding and xyz embedding
-final_embedding = concat(motion_embedding, xyz_embedding)
+**Create motion embedding with 3 channels**:
+- `motion_input = (dx, dy, sqrt(dx² + dy²))_t`
 
-# Note: NaN values are filled with 0.0
-```
+**Final embedding is concatenation**:
+- `final_embedding = concat(motion_embedding, xyz_embedding)`
+
+**Note**: NaN values are filled with 0.0
 
 #### 4. Landmark-Specific Embeddings with Attention
+
 - Each landmark group has dedicated embedding network
 - **Learnable soft attention weights** combine features:
   ```python
@@ -216,8 +226,8 @@ final_embedding = concat(motion_embedding, xyz_embedding)
 - Empty landmark handling with trainable embeddings
 
 #### 5. Test-Time Augmentation (TTA)
-```python
-# TTA strategies for Conv1D models:
+
+**TTA strategies for Conv1D models**:
 - Random left/right padding for short sequences
 - For large sequences: probabilistic frame dropping based on hand presence
 - Different landmark combinations for different models:
@@ -228,72 +238,73 @@ final_embedding = concat(motion_embedding, xyz_embedding)
 - Single hand models: detect dominant hand, mirror if left-handed
 - Frame counts: 32 frames (most models) or 96 frames (one model)
 
-# Each Conv1D model uses dual preprocessing at inference:
+**Each Conv1D model uses dual preprocessing at inference**:
+```python
 x = preprocess_layer[0](inputs)  # Standard preprocessing
 x1 = preprocess_layer[1](inputs) # With random frame sampling (r_long=True)
 outputs = 0.5*model(x) + 0.5*model(x1)  # Average predictions
+```
 
-# Results: 6 Conv1D models ensemble achieved:
+**Results**: 6 Conv1D models ensemble achieved:
 - Public LB: 0.7948
 - Private LB: 0.8711
-```
 
 #### 6. Optimized Model Ensemble
-```python
-# Final ensemble: 6 Conv1D models + 2 Transformer models
-# This combination achieved 3rd place in the competition
 
-# Conv1D models with TTA:
-- model_96frames    # Long sequence model (96 frames)
-- model_32frames    # Base Conv1D (32 frames)
-- model_32pose      # With pose landmarks
-- model_32eyes      # With eye tracking  
-- model_v0sparse    # Sparse eye landmarks (every 2nd point)
-- model_singlehand  # Single dominant hand model
+**Final ensemble**: 6 Conv1D models + 2 Transformer models  
+This combination achieved 3rd place in the competition
 
-# Transformer models:
-- transformer_type1  # Separate embeddings model
-- transformer_type2  # Single embedding model
+**Conv1D models with TTA**:
+- `model_96frames` - Long sequence model (96 frames)
+- `model_32frames` - Base Conv1D (32 frames)
+- `model_32pose` - With pose landmarks
+- `model_32eyes` - With eye tracking  
+- `model_v0sparse` - Sparse eye landmarks (every 2nd point)
+- `model_singlehand` - Single dominant hand model
 
-# The ensemble strategy with TTA enabled fast, lightweight inference
-# while maintaining high accuracy on both public and private leaderboards
-```
+**Transformer models**:
+- `transformer_type1` - Separate embeddings model
+- `transformer_type2` - Single embedding model
+
+The ensemble strategy with TTA enabled fast, lightweight inference while maintaining high accuracy on both public and private leaderboards.
 
 ### 📊 Data Augmentation Strategies
 
 #### Training-Time Augmentations
-1. **Global Augmentations** (Applied to all frames consistently)
-   - Random rotation, shift, scale applied globally to each frame
-   - Random small shift added to every point
-   - Rotation: -10 to 10 degrees
-   - Shift: -0.1 to 0.1
-   - Scale: 0.8 to 1.2
-   - Shear: -1.0 to 1.0
-   - Flip: applied for some signs
 
-2. **Part Combinations** (Significant score improvement)
-   - Take hand from one sample and lips from another sample with the same label
-   - Creates new synthetic training examples
-   - Helps model learn independent features for different body parts
+**1. Global Augmentations** (Applied to all frames consistently)
+- Random rotation, shift, scale applied globally to each frame
+- Random small shift added to every point
+- Rotation: -10° to 10°
+- Shift: -0.1 to 0.1
+- Scale: 0.8 to 1.2
+- Shear: -1.0 to 1.0
+- Flip: applied for some signs
 
-3. **CutMix Augmentation** (Custom Implementation)
-   - Mixed samples from different sign language classes
-   - **Weighted label assignment**:
-     - Hand landmarks: 0.7 weight (primary signal)
-     - Other landmarks (lips, pose): 0.3 weight (context)
-   - Helps model learn robust features across different signers
+**2. Part Combinations** (Significant score improvement)
+- Take hand from one sample and lips from another sample with the same label
+- Creates new synthetic training examples
+- Helps model learn independent features for different body parts
 
-4. **Time-based Augmentations** (Transformer models)
-   - Random augmentation of 1-8 frames with affine transformations
-   - Random frame dropping (filled with 0.0)
-   - Greatly improved transformer model scores
+**3. CutMix Augmentation** (Custom Implementation)
+- Mixed samples from different sign language classes
+- **Weighted label assignment**:
+  - Hand landmarks: 0.7 weight (primary signal)
+  - Other landmarks (lips, pose): 0.3 weight (context)
+- Helps model learn robust features across different signers
 
-5. **Other Augmentations**
-   - **Hand Mirroring**: Automatic left/right hand detection per video
-   - **Late dropout scheduling**: Starts at epoch 80 to prevent early overfitting
-   - **Zero-mean variants**: Some models trained with μ=0 normalization
+**4. Time-based Augmentations** (Transformer models)
+- Random augmentation of 1-8 frames with affine transformations
+- Random frame dropping (filled with 0.0)
+- Greatly improved transformer model scores
+
+**5. Other Augmentations**
+- **Hand Mirroring**: Automatic left/right hand detection per video
+- **Late dropout scheduling**: Starts at epoch 80 to prevent early overfitting
+- **Zero-mean variants**: Some models trained with μ=0 normalization
 
 #### Test-Time Augmentations (TTA)
+
 - **Dual preprocessing paths** with 50/50 averaging
 - **Random frame sampling** (r_long=True) vs deterministic sampling
 - **Multiple landmark configurations** (with/without eyes, sparse landmarks)
@@ -347,18 +358,17 @@ Kaggle-Google-Sign-Language-3rd-Place/
 
 ## Experiments That Didn't Make Final Solution
 
-1. **Synthetic Data Generation**
-   - Found a paper on generating synthetic 3D hand points parametrized by inner parameters (joint rotations) and camera model
-   - Created script to generate synthetic hand data
-   - Attempted to pretrain model to predict hand inner parameters from 3D points
-   - Planned to use this pretrained model for data preprocessing
-   - Insufficient time to complete implementation
+### 1. Synthetic Data Generation
+- Found a paper on generating synthetic 3D hand points parametrized by inner parameters (joint rotations) and camera model
+- Created script to generate synthetic hand data
+- Attempted to pretrain model to predict hand inner parameters from 3D points
+- Planned to use this pretrained model for data preprocessing
+- Insufficient time to complete implementation
 
-2. **Additional Dataset - WLASL**
-   - Trained on WLASL (Word-Level American Sign Language) dataset
-   - Achieved ~0.005-0.007 increase in local CV score
-   - Ultimately abandoned and didn't use in final LB submissions
-
+### 2. Additional Dataset - WLASL
+- Trained on WLASL (Word-Level American Sign Language) dataset
+- Achieved ~0.005-0.007 increase in local CV score
+- Ultimately abandoned and didn't use in final LB submissions
 
 ## Contact
 

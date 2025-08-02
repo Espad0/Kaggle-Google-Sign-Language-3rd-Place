@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository contains the 3rd place solution developed by our team for the [Google - Isolated Sign Language](https://www.kaggle.com/competitions/asl-signs/overview) competition on Kaggle. The challenge involved building a model to recognize Isolated Sign Language (ISL) gestures from video sequences captured via MediaPipe landmarks.
+This repository contains the training pipeline based on our 3rd place solution for the [Google - Isolated Sign Language](https://www.kaggle.com/competitions/asl-signs/overview) competition on Kaggle. The challenge involved building a model to recognize Isolated Sign Language (ISL) gestures from video sequences captured via MediaPipe landmarks.
 
 ## Problem Statement
 
@@ -19,6 +19,8 @@ The competition challenged participants to build a computer vision system capabl
 - 250+ gesture classes including letters, numbers, and common signs
 
 ## Solution Architecture
+
+We ensemble Transformers and Conv1D architectures, with custom preprocessing for sign language landmarks. This approach captures both temporal patterns (Transformers) and local features (Conv1D), improving robustness and accuracy across diverse signing styles and conditions.
 
 ### 📐 Model Architectures
 

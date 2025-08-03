@@ -19,57 +19,63 @@ The competition challenged participants to build a computer vision system capabl
 
 ## Solution
 
-We used an ensemble of six Conv1D models and two versions of transformers based on the public notebook. **The key points are data preprocessing, hard augmentation and ensemble.**
-
-We ensemble Transformers and Conv1D architectures, with custom preprocessing for sign language landmarks. This approach captures both temporal patterns (Transformers) and local features (Conv1D), improving robustness and accuracy across diverse signing styles and conditions.
+We used an ensemble of six Conv1D models and two versions of transformers. This approach captures both temporal patterns (Transformers) and local features (Conv1D), improving robustness and accuracy across diverse signing styles and conditions.
 
 ### 📐 Model Architectures
 
 #### Conv1D Model Implementation
 
 ```python
-# Conv1D Model Architecture (Sequential API - as in solution)
-do = 0.5
-max_len = 32  # or 96 for one model
-
-model = Sequential()
-model.add(InputLayer(input_shape=(max_len, 61, 2)))
-model.add(Reshape((max_len, 61*2)))
-
-model.add(Conv1D(64, 1, strides=1, padding='valid', activation='relu'))
-model.add(BatchNormalization())
-model.add(DepthwiseConv1D(3, strides=1, padding='valid', depth_multiplier=1, activation='relu'))
-model.add(BatchNormalization())
-
-model.add(Conv1D(64, 1, strides=1, padding='valid', activation='relu'))
-model.add(BatchNormalization())
-model.add(DepthwiseConv1D(5, strides=2, padding='valid', depth_multiplier=4, activation='relu'))
-model.add(BatchNormalization())
-
-model.add(MaxPool1D(2, 2))
-
-model.add(Conv1D(256, 1, strides=1, padding='valid', activation='relu'))
-model.add(BatchNormalization())
-model.add(DepthwiseConv1D(3, strides=1, padding='valid', depth_multiplier=1, activation='relu'))
-model.add(BatchNormalization())
-
-model.add(Conv1D(256, 1, strides=1, padding='valid', activation='relu'))
-model.add(BatchNormalization())
-model.add(DepthwiseConv1D(5, strides=2, padding='valid', depth_multiplier=4, activation='relu'))
-model.add(BatchNormalization())
-
-model.add(GlobalAvgPool1D())
-model.add(Dropout(rate=do))
-
-model.add(Dense(1024, activation='relu'))
-model.add(BatchNormalization())
-model.add(Dropout(rate=do))
-
-model.add(Dense(1024, activation='relu'))
-model.add(BatchNormalization())
-model.add(Dropout(rate=do))
-
-model.add(Dense(250, activation='softmax'))
+# Conv1D Model Architecture (Functional API)
+def build_conv1d_model(max_len=32, do=0.5):
+    # Input layer
+    inputs = Input(shape=(max_len, 61, 2))
+    x = Reshape((max_len, 61*2))(inputs)
+    
+    # First Conv block
+    x = Conv1D(64, 1, strides=1, padding='valid', activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = DepthwiseConv1D(3, strides=1, padding='valid', depth_multiplier=1, activation='relu')(x)
+    x = BatchNormalization()(x)
+    
+    # Second Conv block
+    x = Conv1D(64, 1, strides=1, padding='valid', activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = DepthwiseConv1D(5, strides=2, padding='valid', depth_multiplier=4, activation='relu')(x)
+    x = BatchNormalization()(x)
+    
+    # Pooling
+    x = MaxPool1D(2, 2)(x)
+    
+    # Third Conv block
+    x = Conv1D(256, 1, strides=1, padding='valid', activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = DepthwiseConv1D(3, strides=1, padding='valid', depth_multiplier=1, activation='relu')(x)
+    x = BatchNormalization()(x)
+    
+    # Fourth Conv block
+    x = Conv1D(256, 1, strides=1, padding='valid', activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = DepthwiseConv1D(5, strides=2, padding='valid', depth_multiplier=4, activation='relu')(x)
+    x = BatchNormalization()(x)
+    
+    # Global pooling
+    x = GlobalAvgPool1D()(x)
+    x = Dropout(rate=do)(x)
+    
+    # Dense layers
+    x = Dense(1024, activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = Dropout(rate=do)(x)
+    
+    x = Dense(1024, activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = Dropout(rate=do)(x)
+    
+    # Output layer
+    outputs = Dense(250, activation='softmax')(x)
+    
+    return Model(inputs=inputs, outputs=outputs)
 ```
 
 #### Transformer Model Implementation

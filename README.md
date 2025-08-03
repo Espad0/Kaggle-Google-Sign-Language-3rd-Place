@@ -150,15 +150,15 @@ def build_transformer():
 
 **Hyperparameters:** 
 - `NUM_BLOCKS=2`, `NUM_HEAD=8`
-- Learning rate: 1e-3, AdamW optimizer
-- 100 epochs
-- LateDropout: 0.2-0.3
-- LabelSmoothing: 0.5
+- `LEARNING_RATE=1e-3`, `OPTIMIZER='AdamW'`
+- `EPOCHS=100`
+- `LATE_DROPOUT=0.2-0.3`
+- `LABEL_SMOOTHING=0.5`
 
 #### 2. Conv1D Models (6 specialized variants)
 
 - Depthwise separable convolutions (DepthwiseConv1D) with depth multipliers 1-4x
-- Utilized native TFLite layers for optimal mobile performance
+- Native TFLite layers for optimal mobile performance
 - Multiple preprocessing strategies:
   - **Base model**: lips + hands (21 points each)  
   - **Pose variant**: Adds pose landmarks for body context
@@ -172,7 +172,7 @@ def build_transformer():
 #### 1. Preprocessing Pipeline
 
 **Landmark extraction strategy** (543 total landmarks → 102 selected):
-- **LIPS**: 20 carefully selected mouth landmarks
+- **LIPS**: 20 selected mouth landmarks
 - **HANDS**: 42 total hand keypoints (21 left + 21 right)
 - **POSE**: 8 upper body joints (shoulders, elbows, wrists, hips)
 - **EYES**: 32 eye contour points (16 per eye)
